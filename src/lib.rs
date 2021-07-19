@@ -19,6 +19,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time;
 
+mod btree;
+
 #[derive(Debug, PartialEq)]
 pub enum DbError {
     // ErrTxNotWritable is returned when performing a write operation on a
