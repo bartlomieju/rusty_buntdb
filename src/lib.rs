@@ -14,7 +14,7 @@ use std::sync::RwLock;
 use std::time;
 
 #[derive(Debug)]
-pub enum BuntDBError {
+pub enum DBError {
     // ErrTxNotWritable is returned when performing a write operation on a
     // read-only transaction.
     TxNotWritable,
@@ -52,9 +52,9 @@ pub enum BuntDBError {
     TxIterating,
 }
 
-impl fmt::Display for BuntDBError {
+impl fmt::Display for DBError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use BuntDBError::*;
+        use DBError::*;
         match self {
             TxNotWritable => write!(f, "tx not writable"),
             TxClosed => write!(f, "tx closed"),
@@ -71,7 +71,7 @@ impl fmt::Display for BuntDBError {
     }
 }
 
-impl Error for BuntDBError {}
+impl Error for DBError {}
 
 /// DB represents a collection of key-value pairs that persist on disk.
 /// Transactions are used for all forms of data access to the DB.
@@ -231,11 +231,11 @@ impl DB {
 
     /// `close` releases all database resources.
     /// All transactions must be closed before closing the database.
-    pub fn close(mut self) -> Result<(), BuntDBError> {
+    pub fn close(mut self) -> Result<(), DBError> {
         let _g = self.mu.write().unwrap();
 
         if self.closed {
-            return Err(BuntDBError::DatabaseClosed);
+            return Err(DBError::DatabaseClosed);
         }
 
         self.closed = true;
@@ -305,7 +305,7 @@ impl DB {
         let _g = self.mu.write().unwrap();
 
         if self.persist {
-            let err = io::Error::new(io::ErrorKind::Other, BuntDBError::PersistenceActive);
+            let err = io::Error::new(io::ErrorKind::Other, DBError::PersistenceActive);
             return Err(err);
         }
 
@@ -392,29 +392,29 @@ impl DB {
     }
 
     /// DropIndex removes an index.
-    pub fn drop_index(&mut self, name: String) -> Result<(), io::Error> {
-        todo!()
+    pub fn drop_index(&mut self, name: String) -> Result<(), DBError> {
+        self.update(|tx: &mut Tx| tx.drop_index(name.clone()))
     }
 
     /// Indexes returns a list of index names.
-    pub fn indexes(&self) -> (Vec<String>, io::Error) {
-        todo!()
+    pub fn indexes(&mut self) -> Result<Vec<String>, DBError> {
+        self.view(|tx: &mut Tx| tx.indexes())
     }
 
     /// ReadConfig returns the database configuration.
-    pub fn read_config(&self) -> Result<Config, BuntDBError> {
+    pub fn read_config(&self) -> Result<Config, DBError> {
         let _g = self.mu.read().unwrap();
         if self.closed {
-            return Err(BuntDBError::DatabaseClosed);
+            return Err(DBError::DatabaseClosed);
         }
         Ok(self.config.clone())
     }
 
     /// SetConfig updates the database configuration.
-    pub fn set_config(&mut self, config: Config) -> Result<(), BuntDBError> {
+    pub fn set_config(&mut self, config: Config) -> Result<(), DBError> {
         let _g = self.mu.read().unwrap();
         if self.closed {
-            return Err(BuntDBError::DatabaseClosed);
+            return Err(DBError::DatabaseClosed);
         }
         self.config = config;
         Ok(())
@@ -451,8 +451,31 @@ impl DB {
 
     /// managed calls a block of code that is fully contained in a transaction.
     /// This method is intended to be wrapped by Update and View
-    fn managed() {
-        todo!()
+    fn managed<F, R>(&mut self, writable: bool, func: F) -> Result<R, DBError>
+    where
+        F: Fn(&mut Tx) -> Result<R, DBError>,
+    {
+        let mut tx = self.begin(writable)?;
+        tx.funcd = true;
+
+        let func_result = func(&mut tx);
+        if let Err(err) = func_result {
+            // The caller returned an error. We must rollback;
+            let _ = tx.rollback();
+            tx.funcd = false;
+            return Err(err);
+        }
+        let rt = func_result.unwrap();
+
+        let result = if writable {
+            // Everything went well. Lets commit
+            tx.commit()
+        } else {
+            // read-only transaction can only roll back
+            tx.rollback()
+        };
+        tx.funcd = false;
+        result.map(|_| rt)
     }
 
     /// View executes a function within a managed read-only transaction.
@@ -461,8 +484,11 @@ impl DB {
     ///
     /// Executing a manual commit or rollback from inside the function will result
     /// in a panic.
-    pub fn view() {
-        todo!()
+    pub fn view<F, R>(&mut self, func: F) -> Result<R, DBError>
+    where
+        F: Fn(&mut Tx) -> Result<R, DBError>,
+    {
+        self.managed(false, func)
     }
 
     /// Update executes a function within a managed read/write transaction.
@@ -473,8 +499,11 @@ impl DB {
     ///
     /// Executing a manual commit or rollback from inside the function will result
     /// in a panic.
-    pub fn update() {
-        todo!()
+    pub fn update<F, R>(&mut self, func: F) -> Result<R, DBError>
+    where
+        F: Fn(&mut Tx) -> Result<R, DBError>,
+    {
+        self.managed(true, func)
     }
 
     /// get return an item or nil if not found.
@@ -489,8 +518,27 @@ impl DB {
     // the current read/write transaction is completed.
     //
     // All transactions must be closed by calling Commit() or Rollback() when done.
-    fn begin(&mut self, writable: bool) {
-        todo!();
+    fn begin(&mut self, writable: bool) -> Result<Tx, DBError> {
+        let mut tx = Tx {
+            db: Some(self),
+            writable,
+            funcd: false,
+            wc: None,
+        };
+
+        tx.lock();
+
+        if tx.db.as_ref().unwrap().closed {
+            // TODO:
+            // tx.unlock();
+            return Err(DBError::DatabaseClosed);
+        }
+
+        if writable {
+            tx.wc = Some(TxWriteContext::default());
+        }
+
+        Ok(tx)
     }
 }
 
@@ -639,17 +687,20 @@ impl DbItem {
 // transactions can set and delete keys.
 //
 // All transactions must be committed or rolled-back when done.
-struct Tx {
+// TODO: this lifetime makes no sense - we clear db option when transaction
+// is no longer valid - it should be an arc<mutex<>> or something like this
+struct Tx<'db> {
     /// the underlying database.
-    db: DB,
+    db: Option<&'db mut DB>,
     /// when false mutable operations fail.
     writable: bool,
     /// when true Commit and Rollback panic.
     funcd: bool,
     /// context for writable transactions.
-    wc: TxWriteContext,
+    wc: Option<TxWriteContext>,
 }
 
+#[derive(Default)]
 struct TxWriteContext {
     // rollback when deleteAll is called
     // a tree of all item ordered by key
@@ -669,10 +720,52 @@ struct TxWriteContext {
     rollback_indexes: HashMap<String, Index>,
 }
 
-impl Tx {
+impl<'db> Tx<'db> {
     // DeleteAll deletes all items from the database.
     fn delete_all(&mut self) {
         todo!()
+    }
+
+    fn indexes(&self) -> Result<Vec<String>, DBError> {
+        if self.db.is_none() {
+            return Err(DBError::TxClosed);
+        }
+
+        let db = self.db.as_ref().unwrap();
+        let mut names = db
+            .idxs
+            .keys()
+            .map(|k| k.to_string())
+            .collect::<Vec<String>>();
+        names.sort();
+
+        Ok(names)
+    }
+
+    fn drop_index(&mut self, name: String) -> Result<(), DBError> {
+        if self.db.is_none() {
+            return Err(DBError::TxClosed);
+        } else if !self.writable {
+            return Err(DBError::TxNotWritable);
+        } else if self.wc.as_ref().unwrap().itercount > 0 {
+            return Err(DBError::TxIterating);
+        }
+
+        if name == "" {
+            // cannot drop the default "keys" index
+            return Err(DBError::InvalidOperation);
+        }
+
+        let maybe_idx = self.db.as_mut().unwrap().idxs.remove(&name);
+        if maybe_idx.is_none() {
+            return Err(DBError::NotFound);
+        }
+        let idx = maybe_idx.unwrap();
+        // TODO:
+        // if self.wc.unwrap().rbkeys {
+
+        // }
+        Ok(())
     }
 
     // lock locks the database based on the transaction type.
@@ -704,7 +797,7 @@ impl Tx {
     // Commit writes all changes to disk.
     // An error is returned when a write error occurs, or when a Commit() is called
     // from a read-only transaction.
-    fn commit(&mut self) -> Result<(), BuntDBError> {
+    fn commit(&mut self) -> Result<(), DBError> {
         todo!()
     }
 
@@ -712,7 +805,7 @@ impl Tx {
     // were performed on the transaction such as Set() and Delete().
     //
     // Read-only transactions can only be rolled back, not committed.
-    fn rollback(&mut self) -> Result<(), BuntDBError> {
+    fn rollback(&mut self) -> Result<(), DBError> {
         todo!()
     }
 
@@ -720,7 +813,7 @@ impl Tx {
     // doing ad-hoc compares inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no less
     // function bound to the index
-    fn get_less(&self, index: String) -> Result<(), BuntDBError> {
+    fn get_less(&self, index: String) -> Result<(), DBError> {
         todo!()
     }
 
@@ -728,7 +821,7 @@ impl Tx {
     // doing ad-hoc searches inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no rect
     // function bound to the index
-    fn get_rect(&self, index: String) -> Result<(), BuntDBError> {
+    fn get_rect(&self, index: String) -> Result<(), DBError> {
         todo!()
     }
 
@@ -759,14 +852,14 @@ impl Tx {
     //
     // Only a writable transaction can be used for this operation.
     // This operation is not allowed during iterations such as Ascend* & Descend*.
-    fn delete(&mut self, key: String) -> Result<String, BuntDBError> {
+    fn delete(&mut self, key: String) -> Result<String, DBError> {
         todo!()
     }
 
     // TTL returns the remaining time-to-live for an item.
     // A negative duration will be returned for items that do not have an
     // expiration.
-    fn ttl(&mut self, key: String) -> Result<time::Duration, BuntDBError> {
+    fn ttl(&mut self, key: String) -> Result<time::Duration, DBError> {
         todo!()
     }
 
@@ -789,7 +882,7 @@ impl Tx {
         start: String,
         stop: String,
         iterator: F,
-    ) -> Result<(), BuntDBError>
+    ) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -797,7 +890,7 @@ impl Tx {
     }
 
     // AscendKeys allows for iterating through keys based on the specified pattern.
-    fn ascend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), BuntDBError>
+    fn ascend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -805,7 +898,7 @@ impl Tx {
     }
 
     // DescendKeys allows for iterating through keys based on the specified pattern.
-    fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), BuntDBError>
+    fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -818,7 +911,7 @@ impl Tx {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), BuntDBError>
+    fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -836,7 +929,7 @@ impl Tx {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), BuntDBError>
+    ) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -854,7 +947,7 @@ impl Tx {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), BuntDBError>
+    ) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -873,7 +966,7 @@ impl Tx {
         greater_or_equal: String,
         less_than: String,
         iterator: F,
-    ) -> Result<(), BuntDBError>
+    ) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -886,7 +979,7 @@ impl Tx {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend<F>(&mut self, index: String, iterator: F) -> Result<(), BuntDBError>
+    fn descend<F>(&mut self, index: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -904,7 +997,7 @@ impl Tx {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), BuntDBError>
+    ) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -922,7 +1015,7 @@ impl Tx {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), BuntDBError>
+    ) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -941,7 +1034,7 @@ impl Tx {
         less_or_equal: String,
         greater_than: String,
         iterator: F,
-    ) -> Result<(), BuntDBError>
+    ) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -954,12 +1047,7 @@ impl Tx {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_equal<F>(
-        &mut self,
-        index: String,
-        pivot: String,
-        iterator: F,
-    ) -> Result<(), BuntDBError>
+    fn ascend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -972,12 +1060,7 @@ impl Tx {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend_equal<F>(
-        &mut self,
-        index: String,
-        pivot: String,
-        iterator: F,
-    ) -> Result<(), BuntDBError>
+    fn descend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -993,7 +1076,7 @@ impl Tx {
     // An invalid index will return an error.
     // The dist param is the distance of the bounding boxes. In the case of
     // simple 2D points, it's the distance of the two 2D points squared.
-    fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), BuntDBError>
+    fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String, f64) -> bool,
     {
@@ -1005,12 +1088,7 @@ impl Tx {
     // is represented by the rect string. This string will be processed by the
     // same bounds function that was passed to the CreateSpatialIndex() function.
     // An invalid index will return an error.
-    fn intersects<F>(
-        &mut self,
-        index: String,
-        bounds: String,
-        iterator: F,
-    ) -> Result<(), BuntDBError>
+    fn intersects<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DBError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1018,7 +1096,7 @@ impl Tx {
     }
 
     // Len returns the number of items in the database
-    fn len(&self) -> Result<i64, BuntDBError> {
+    fn len(&self) -> Result<i64, DBError> {
         todo!()
     }
 }
