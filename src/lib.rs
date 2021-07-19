@@ -20,6 +20,7 @@ use std::sync::RwLock;
 use std::time;
 
 mod btree;
+use btree::BTree;
 
 #[derive(Debug, PartialEq)]
 pub enum DbError {
@@ -94,10 +95,10 @@ pub struct Db {
     buf: Vec<u8>,
 
     /// a tree of all item ordered by key
-    keys: BTreeSet<OrdByKeyItem>,
+    keys: BTree<DbItem>,
 
     /// a tree of items ordered by expiration
-    exps: BTreeSet<OrdByExpItem>,
+    exps: BTree<DbItem>,
 
     /// the index trees.
     idxs: HashMap<String, Arc<Index>>,
@@ -188,9 +189,7 @@ pub struct Config {
 }
 
 // `ExCtx` is a simple b-tree context for ordering by expiration.
-struct ExCtx {
-    db: Db,
-}
+struct ExCtx {}
 
 impl Db {
     pub fn open(path: &str) -> Result<Db, io::Error> {
@@ -205,8 +204,8 @@ impl Db {
             mu: RwLock::new(()),
             file: None,
             buf: Vec::new(),
-            keys: BTreeSet::new(),
-            exps: BTreeSet::new(),
+            keys: BTree::new(less_ctx()),
+            exps: BTree::new(less_ctx()),
             idxs: HashMap::new(),
             ins_idxs: Vec::new(),
             flushes: 0,
@@ -573,6 +572,12 @@ impl Db {
     }
 }
 
+fn less_ctx<T>() -> Arc<dyn Fn(T, T) -> bool> {
+    Arc::new(move |a: T, b: T| -> bool {
+        // a.less(b)
+        false
+    })
+}
 /// `IndexOptions` provides an index with additional features or
 /// alternate functionality.
 #[derive(Clone, Default)]
@@ -586,7 +591,7 @@ struct IndexOptions {
 /// b-tree/r-tree context for itself.
 struct Index {
     // contains the items
-    btr: Option<BTreeMap<String, String>>,
+    btr: Option<BTree<DbItem>>,
 
     /// contains the items
     // rtr     *rtred.RTree
@@ -603,7 +608,7 @@ struct Index {
     rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
 
     /// the origin database
-    // db: Db,
+    // db: Arc<Db>,
 
     /// index options
     opts: IndexOptions,
@@ -658,8 +663,49 @@ impl Index {
 
     // `rebuild` rebuilds the index
     pub fn rebuild(&mut self) {
-        todo!()
+        // initialize trees
+        if self.less.is_some() {
+            // TODO: less_ctx(self)
+            self.btr = Some(BTree::new(less_ctx()));
+        }
+        if self.rect.is_some() {
+            // TODO:
+            // self.rtr =
+        }
+        // iterate through all keys and fill the index
+        // TODO:
+        // btree_ascend(self.db.keys, Arc::new(|item| {
+        //     if !self.matches(&item.key) {
+        //         // does not match the pattern continue
+        //         return true
+        //     }
+        //     if self.less.is_some() {
+        //         self.btr.as_mut().unwrap().set(item);
+        //     }
+        //     if self.rect.is_some() {
+        //         // TODO:
+        //         // self.rtr
+        //     }
+        //     return true;
+        // }))
     }
+}
+
+fn make_db_item_less(
+    func: Arc<dyn Fn(&DbItem, &DbItem) -> Option<bool>>,
+) -> Arc<dyn Fn(DbItem, DbItem) -> bool> {
+    Arc::new(move |a, b| {
+        if let Some(value) = func(&a, &b) {
+            return value;
+        }
+
+        if a.keyless {
+            return false;
+        } else if b.keyless {
+            return true;
+        }
+        return a.key < b.key;
+    })
 }
 
 #[derive(Eq, PartialEq)]
@@ -872,6 +918,7 @@ impl<'db> Tx<'db> {
 
         let mut idx = Index {
             btr: None,
+            // db: self.db.clone().unwrap(),
             name,
             pattern,
             less,
@@ -1335,6 +1382,10 @@ struct SetOptions {
 struct Rect {
     min: Vec<f64>,
     max: Vec<f64>,
+}
+
+fn btree_ascend<T>(tr: BTree<T>, iter: Arc<dyn Fn(T) -> bool>) {
+    tr.ascend(None, iter)
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@ impl<T> Node<T> {
 struct PathHint {}
 
 // BTree is an ordered set items
-struct BTree<T> {
+pub struct BTree<T> {
     _marker: PhantomData<T>,
 }
 
@@ -66,7 +66,7 @@ impl<T> BTree<T> {
     }
 
     // Set or replace a value for a key
-    fn set(&mut self, item: T) -> T {
+    pub fn set(&mut self, item: T) -> T {
         todo!()
     }
 
@@ -131,7 +131,7 @@ impl<T> BTree<T> {
     }
 
     // DeleteHint deletes a value for a key using a path hint
-    pub fn delete_hint(&mut self, key: T, hint: Option<PathHint>) -> Option<T> {
+    fn delete_hint(&mut self, key: T, hint: Option<PathHint>) -> Option<T> {
         todo!()
     }
 
@@ -142,13 +142,13 @@ impl<T> BTree<T> {
     // Ascend the tree within the range [pivot, last]
     // Pass nil for pivot to scan all item in ascending order
     // Return false to stop iterating
-    fn ascend(&self, pivot: T, iter: Arc<dyn Fn(T) -> bool>) {
+    pub fn ascend(&self, pivot: Option<T>, iter: Arc<dyn Fn(T) -> bool>) {
         todo!()
     }
 
     fn ascend_inner(
         &self,
-        pivot: T,
+        pivot: Option<T>,
         less: Arc<dyn Fn(T, T) -> bool>,
         hint: Option<PathHint>,
         depth: i64,
