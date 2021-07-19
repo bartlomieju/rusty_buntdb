@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum DBError {
     // ErrTxNotWritable is returned when performing a write operation on a
     // read-only transaction.
@@ -345,7 +345,7 @@ impl DB {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Box<dyn Fn(String, String) -> bool>>,
+        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
     ) -> Result<(), DBError> {
         self.update(move |tx| tx.create_index(name, pattern, less))
     }
@@ -358,9 +358,20 @@ impl DB {
         &mut self,
         name: String,
         pattern: String,
-        less: Box<dyn Fn(String, String) -> bool>,
-    ) -> Result<(), io::Error> {
-        todo!()
+        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
+    ) -> Result<(), DBError> {
+        self.update(move |tx| {
+            if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
+                if err == DBError::IndexExists {
+                    if let Err(err) = tx.drop_index(name.clone()) {
+                        return Err(err);
+                    }
+                    return tx.create_index(name, pattern, less);
+                }
+                return Err(err);
+            }
+            Ok(())
+        })
     }
 
     // CreateSpatialIndex builds a new index and populates it with items.
@@ -381,7 +392,7 @@ impl DB {
         &mut self,
         name: String,
         pattern: String,
-        rect: Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
     ) -> Result<(), io::Error> {
         todo!()
     }
@@ -394,7 +405,7 @@ impl DB {
         &mut self,
         name: String,
         pattern: String,
-        rect: Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
     ) -> Result<(), io::Error> {
         todo!()
     }
@@ -575,10 +586,10 @@ struct Index {
     pattern: String,
 
     /// less comparison function
-    // less: Option<Box<dyn Fn(String, String) -> bool>>,
+    // less: Option<Arc<dyn Fn(String, String) -> bool>>,
 
     /// rect from string function
-    // rect: Option<Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
+    // rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
 
     /// the origin database
     // db: DB,
@@ -792,8 +803,8 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        lessers: Vec<Box<dyn Fn(String, String) -> bool>>,
-        rect: Option<Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
+        lessers: Vec<Arc<dyn Fn(String, String) -> bool>>,
+        rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
         opts: Option<IndexOptions>,
     ) -> Result<(), DBError> {
         if self.db.is_none() {
@@ -863,7 +874,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Box<dyn Fn(String, String) -> bool>>,
+        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
     ) -> Result<(), DBError> {
         self.create_index_inner(name, pattern, less, None, None)
     }
@@ -875,7 +886,7 @@ impl<'db> Tx<'db> {
         name: String,
         pattern: String,
         opts: IndexOptions,
-        less: Vec<Box<dyn Fn(String, String) -> bool>>,
+        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
     ) -> Result<(), DBError> {
         self.create_index_inner(name, pattern, less, None, Some(opts))
     }
