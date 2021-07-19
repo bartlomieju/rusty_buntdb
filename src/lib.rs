@@ -3,6 +3,8 @@
 //! readers and a single writer. Bunt is ideal for projects that need a
 //! dependable database, and favor speed over data size.
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
@@ -90,7 +92,7 @@ pub struct DB {
     // exps:      *btree.BTree,
 
     /// the index trees.
-    // idxs:      map[string]*index,
+    idxs: HashMap<String, Index>,
 
     /// a reuse buffer for gathering indexes
     // insIdxs:   []*index,
@@ -115,6 +117,7 @@ pub struct DB {
 }
 
 /// SyncPolicy represents how often data is synced to disk.
+#[derive(Clone)]
 pub enum SyncPolicy {
     /// Never is used to disable syncing data to disk.
     /// The faster and less safe method.
@@ -139,7 +142,7 @@ impl Default for SyncPolicy {
 
 // Config represents database configuration options. These
 // options are used to change various behaviors of the database.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Config {
     // SyncPolicy adjusts how often the data is synced to disk.
     // This value can be Never, EverySecond, or Always.
@@ -193,7 +196,7 @@ impl DB {
             // TODO:
             // buf: ,
             // exps: ,
-            // idxs: ,
+            idxs: HashMap::new(),
             // insIdxs: ,
             flushes: 0,
             closed: false,
@@ -314,4 +317,227 @@ impl DB {
 
         Ok(())
     }
+
+    /// CreateIndex builds a new index and populates it with items.
+    /// The items are ordered in an b-tree and can be retrieved using the
+    /// Ascend* and Descend* methods.
+    /// An error will occur if an index with the same name already exists.
+    ///
+    /// When a pattern is provided, the index will be populated with
+    /// keys that match the specified pattern. This is a very simple pattern
+    /// match where '*' matches on any number characters and '?' matches on
+    /// any one character.
+    /// The less function compares if string 'a' is less than string 'b'.
+    /// It allows for indexes to create custom ordering. It's possible
+    /// that the strings may be textual or binary. It's up to the provided
+    /// less function to handle the content format and comparison.
+    /// There are some default less function that can be used such as
+    /// IndexString, IndexBinary, etc.
+    pub fn create_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        less: Box<dyn Fn(String, String) -> bool>,
+    ) -> Result<(), io::Error> {
+        todo!()
+    }
+
+    /// ReplaceIndex builds a new index and populates it with items.
+    /// The items are ordered in an b-tree and can be retrieved using the
+    /// Ascend* and Descend* methods.
+    /// If a previous index with the same name exists, that index will be deleted.
+    pub fn replace_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        less: Box<dyn Fn(String, String) -> bool>,
+    ) -> Result<(), io::Error> {
+        todo!()
+    }
+
+    // CreateSpatialIndex builds a new index and populates it with items.
+    // The items are organized in an r-tree and can be retrieved using the
+    // Intersects method.
+    // An error will occur if an index with the same name already exists.
+    //
+    // The rect function converts a string to a rectangle. The rectangle is
+    // represented by two arrays, min and max. Both arrays may have a length
+    // between 1 and 20, and both arrays must match in length. A length of 1 is a
+    // one dimensional rectangle, and a length of 4 is a four dimension rectangle.
+    // There is support for up to 20 dimensions.
+    // The values of min must be less than the values of max at the same dimension.
+    // Thus min[0] must be less-than-or-equal-to max[0].
+    // The IndexRect is a default function that can be used for the rect
+    // parameter.
+    pub fn create_spatial_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        rect: Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+    ) -> Result<(), io::Error> {
+        todo!()
+    }
+
+    // ReplaceSpatialIndex builds a new index and populates it with items.
+    // The items are organized in an r-tree and can be retrieved using the
+    // Intersects method.
+    // If a previous index with the same name exists, that index will be deleted.
+    pub fn replace_spatial_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        rect: Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+    ) -> Result<(), io::Error> {
+        todo!()
+    }
+
+    /// DropIndex removes an index.
+    pub fn drop_index(&mut self, name: String) -> Result<(), io::Error> {
+        todo!()
+    }
+
+    /// Indexes returns a list of index names.
+    pub fn indexes(&self) -> (Vec<String>, io::Error) {
+        todo!()
+    }
+
+    /// ReadConfig returns the database configuration.
+    pub fn read_config(&self) -> Result<Config, BuntDBError> {
+        let _g = self.mu.read().unwrap();
+        if self.closed {
+            return Err(BuntDBError::DatabaseClosed);
+        }
+        Ok(self.config.clone())
+    }
+
+    /// SetConfig updates the database configuration.
+    pub fn set_config(&mut self, config: Config) -> Result<(), BuntDBError> {
+        let _g = self.mu.read().unwrap();
+        if self.closed {
+            return Err(BuntDBError::DatabaseClosed);
+        }
+        self.config = config;
+        Ok(())
+    }
+
+    /// insertIntoDatabase performs inserts an item in to the database and updates
+    /// all indexes. If a previous item with the same key already exists, that item
+    /// will be replaced with the new one, and return the previous item.
+    pub fn insert_into_database(&mut self, item: DbItem) -> DbItem {
+        todo!();
+    }
+}
+
+/// `IndexOptions` provides an index with additional features or
+/// alternate functionality.
+#[derive(Clone)]
+struct IndexOptions {
+    /// `case_insensitive_key_matching` allow for case-insensitive
+    /// matching on keys when setting key/values.
+    case_insensitive_key_matching: bool,
+}
+
+/// `Index` represents a b-tree or r-tree index and also acts as the
+/// b-tree/r-tree context for itself.
+struct Index {
+    // TODO: this should be an option
+    // contains the items
+    btr: Option<BTreeMap<String, String>>,
+
+    /// contains the items
+    // rtr     *rtred.RTree
+
+    /// name of the index
+    name: String,
+    /// a required key pattern
+    pattern: String,
+
+    /// less comparison function
+    // less: Box<dyn Fn(String, String) -> bool>,
+
+    /// rect from string function
+    // rect:    func(item string) (min, max []float64)
+
+    /// the origin database
+    // db: DB,
+
+    /// index options
+    opts: IndexOptions,
+}
+
+impl Index {
+    pub fn r#match(&self, key: &str) -> bool {
+        let mut key = key;
+        if self.pattern == "*" {
+            return true;
+        }
+
+        todo!()
+
+        // if self.opts.case_insensitive_key_matching {
+        //     let len = key.len();
+        //     for i in 0..len {
+        //         if key.get(i).unwrap() >= 'A' && key.get(i).unwrap() <= 'Z' {
+        //             key = &key.to_lowercase();
+        //             break;
+        //         }
+        //     }
+        // }
+
+        // self.pattern.matches(key).peekable().peek().is_some()
+    }
+
+    // `clear_copy` creates a copy of the index, but with an empty dataset.
+    pub fn clear_copy(&self) -> Index {
+        // copy the index meta information
+        let nidx = Index {
+            btr: None,
+            name: self.name.clone(),
+            pattern: self.pattern.clone(),
+            // db: self.db.clone(),
+            // less: self.less.clone(),
+            // rect: self.rect.clone(),
+            opts: self.opts.clone(),
+        };
+
+        // TODO:
+        // initialize with empty trees
+        // if nidx.less != nil {
+        //     nidx.btr = btree.New(lessCtx(nidx))
+        // }
+        // if nidx.rect != nil {
+        //     nidx.rtr = rtred.New(nidx)
+        // }
+
+        if nidx.opts.case_insensitive_key_matching {
+            //
+        }
+
+        nidx
+    }
+
+    // `rebuild` rebuilds the index
+    pub fn rebuild(&mut self) {
+        todo!()
+    }
+}
+
+/// DbItemOpts holds various meta information about an item.
+pub struct DbItemOpts {
+    /// does this item expire?
+    ex: bool,
+    /// when does this item expire?
+    // TODO: probably wrong type?
+    exat: SystemTime,
+}
+
+pub struct DbItem {
+    // the binary key
+    key: String,
+    // the binary value
+    val: String,
+    // optional meta information
+    opts: DbItemOpts,
+    // keyless item for scanning
+    keyless: bool,
 }
