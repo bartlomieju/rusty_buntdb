@@ -481,6 +481,17 @@ impl DB {
     pub fn get(&self, key: String) -> Option<DbItem> {
         todo!()
     }
+
+    // Begin opens a new transaction.
+    // Multiple read-only transactions can be opened at the same time but there can
+    // only be one read/write transaction at a time. Attempting to open a read/write
+    // transactions while another one is in progress will result in blocking until
+    // the current read/write transaction is completed.
+    //
+    // All transactions must be closed by calling Commit() or Rollback() when done.
+    fn begin(&mut self, writable: bool) {
+        todo!();
+    }
 }
 
 /// `IndexOptions` provides an index with additional features or
@@ -620,4 +631,410 @@ impl DbItem {
 
     //     max_time
     // }
+}
+
+// Tx represents a transaction on the database. This transaction can either be
+// read-only or read/write. Read-only transactions can be used for retrieving
+// values for keys and iterating through keys and values. Read/write
+// transactions can set and delete keys.
+//
+// All transactions must be committed or rolled-back when done.
+struct Tx {
+    /// the underlying database.
+    db: DB,
+    /// when false mutable operations fail.
+    writable: bool,
+    /// when true Commit and Rollback panic.
+    funcd: bool,
+    /// context for writable transactions.
+    wc: TxWriteContext,
+}
+
+struct TxWriteContext {
+    // rollback when deleteAll is called
+    // a tree of all item ordered by key
+    // rbkeys *btree.BTree
+    // a tree of items ordered by expiration
+    // rbexps *btree.BTree
+    // the index trees.
+    rbidxs: HashMap<String, Index>,
+
+    /// details for rolling back tx.
+    rollback_items: HashMap<String, DbItem>,
+    // details for committing tx.
+    commit_items: HashMap<String, DbItem>,
+    // stack of iterators
+    itercount: i64,
+    // details for dropped indexes.
+    rollback_indexes: HashMap<String, Index>,
+}
+
+impl Tx {
+    // DeleteAll deletes all items from the database.
+    fn delete_all(&mut self) {
+        todo!()
+    }
+
+    // lock locks the database based on the transaction type.
+    fn lock(&self) {
+        todo!()
+        // if self.writable {
+        //     self.db.mu.write().unwrap();
+        // } else {
+        //     self.db.mu.read().unwrap();
+        // }
+    }
+
+    // unlock unlocks the database based on the transaction type.
+    fn unwrap(&self) {
+        todo!()
+        // if self.writable {
+        //     self.db.mu.unlock();
+        // } else {
+        //     self.db.mu.read_unlock();
+        // }
+    }
+
+    // rollbackInner handles the underlying rollback logic.
+    // Intended to be called from Commit() and Rollback().
+    fn rollback_inner(&mut self) {
+        todo!()
+    }
+
+    // Commit writes all changes to disk.
+    // An error is returned when a write error occurs, or when a Commit() is called
+    // from a read-only transaction.
+    fn commit(&mut self) -> Result<(), BuntDBError> {
+        todo!()
+    }
+
+    // Rollback closes the transaction and reverts all mutable operations that
+    // were performed on the transaction such as Set() and Delete().
+    //
+    // Read-only transactions can only be rolled back, not committed.
+    fn rollback(&mut self) -> Result<(), BuntDBError> {
+        todo!()
+    }
+
+    // GetLess returns the less function for an index. This is handy for
+    // doing ad-hoc compares inside a transaction.
+    // Returns ErrNotFound if the index is not found or there is no less
+    // function bound to the index
+    fn get_less(&self, index: String) -> Result<(), BuntDBError> {
+        todo!()
+    }
+
+    // GetRect returns the rect function for an index. This is handy for
+    // doing ad-hoc searches inside a transaction.
+    // Returns ErrNotFound if the index is not found or there is no rect
+    // function bound to the index
+    fn get_rect(&self, index: String) -> Result<(), BuntDBError> {
+        todo!()
+    }
+
+    // Set inserts or replaces an item in the database based on the key.
+    // The opt params may be used for additional functionality such as forcing
+    // the item to be evicted at a specified time. When the return value
+    // for err is nil the operation succeeded. When the return value of
+    // replaced is true, then the operaton replaced an existing item whose
+    // value will be returned through the previousValue variable.
+    // The results of this operation will not be available to other
+    // transactions until the current transaction has successfully committed.
+    //
+    // Only a writable transaction can be used with this operation.
+    // This operation is not allowed during iterations such as Ascend* & Descend*.
+    fn set(&mut self, key: String, val: String, opts: SetOptions) {
+        todo!()
+    }
+
+    // Get returns a value for a key. If the item does not exist or if the item
+    // has expired then ErrNotFound is returned. If ignoreExpired is true, then
+    // the found value will be returned even if it is expired.
+    fn get(&mut self, key: String, ignore_expired: bool) {
+        todo!()
+    }
+
+    // Delete removes an item from the database based on the item's key. If the item
+    // does not exist or if the item has expired then ErrNotFound is returned.
+    //
+    // Only a writable transaction can be used for this operation.
+    // This operation is not allowed during iterations such as Ascend* & Descend*.
+    fn delete(&mut self, key: String) -> Result<String, BuntDBError> {
+        todo!()
+    }
+
+    // TTL returns the remaining time-to-live for an item.
+    // A negative duration will be returned for items that do not have an
+    // expiration.
+    fn ttl(&mut self, key: String) -> Result<time::Duration, BuntDBError> {
+        todo!()
+    }
+
+    // scan iterates through a specified index and calls user-defined iterator
+    // function for each item encountered.
+    // The desc param indicates that the iterator should descend.
+    // The gt param indicates that there is a greaterThan limit.
+    // The lt param indicates that there is a lessThan limit.
+    // The index param tells the scanner to use the specified index tree. An
+    // empty string for the index means to scan the keys, not the values.
+    // The start and stop params are the greaterThan, lessThan limits. For
+    // descending order, these will be lessThan, greaterThan.
+    // An error will be returned if the tx is closed or the index is not found.
+    fn scan<F>(
+        &mut self,
+        desc: bool,
+        gt: bool,
+        lt: bool,
+        index: String,
+        start: String,
+        stop: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // AscendKeys allows for iterating through keys based on the specified pattern.
+    fn ascend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // DescendKeys allows for iterating through keys based on the specified pattern.
+    fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // Ascend calls the iterator for every item in the database within the range
+    // [first, last], until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // AscendGreaterOrEqual calls the iterator for every item in the database within
+    // the range [pivot, last], until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn ascend_greater_or_equal<F>(
+        &mut self,
+        index: String,
+        pivot: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // AscendLessThan calls the iterator for every item in the database within the
+    // range [first, pivot), until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn ascend_less_than<F>(
+        &mut self,
+        index: String,
+        pivot: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // AscendRange calls the iterator for every item in the database within
+    // the range [greaterOrEqual, lessThan), until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn ascend_range<F>(
+        &mut self,
+        index: String,
+        greater_or_equal: String,
+        less_than: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // Descend calls the iterator for every item in the database within the range
+    // [last, first], until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn descend<F>(&mut self, index: String, iterator: F) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // DescendGreaterThan calls the iterator for every item in the database within
+    // the range [last, pivot), until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn descend_greater_than<F>(
+        &mut self,
+        index: String,
+        pivot: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // DescendLessOrEqual calls the iterator for every item in the database within
+    // the range [pivot, first], until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn descend_less_or_equal<F>(
+        &mut self,
+        index: String,
+        pivot: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // DescendRange calls the iterator for every item in the database within
+    // the range [lessOrEqual, greaterThan), until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn descend_range<F>(
+        &mut self,
+        index: String,
+        less_or_equal: String,
+        greater_than: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // AscendEqual calls the iterator for every item in the database that equals
+    // pivot, until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn ascend_equal<F>(
+        &mut self,
+        index: String,
+        pivot: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // DescendEqual calls the iterator for every item in the database that equals
+    // pivot, until iterator returns false.
+    // When an index is provided, the results will be ordered by the item values
+    // as specified by the less() function of the defined index.
+    // When an index is not provided, the results will be ordered by the item key.
+    // An invalid index will return an error.
+    fn descend_equal<F>(
+        &mut self,
+        index: String,
+        pivot: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // Nearby searches for rectangle items that are nearby a target rect.
+    // All items belonging to the specified index will be returned in order of
+    // nearest to farthest.
+    // The specified index must have been created by AddIndex() and the target
+    // is represented by the rect string. This string will be processed by the
+    // same bounds function that was passed to the CreateSpatialIndex() function.
+    // An invalid index will return an error.
+    // The dist param is the distance of the bounding boxes. In the case of
+    // simple 2D points, it's the distance of the two 2D points squared.
+    fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String, f64) -> bool,
+    {
+        todo!()
+    }
+
+    // Intersects searches for rectangle items that intersect a target rect.
+    // The specified index must have been created by AddIndex() and the target
+    // is represented by the rect string. This string will be processed by the
+    // same bounds function that was passed to the CreateSpatialIndex() function.
+    // An invalid index will return an error.
+    fn intersects<F>(
+        &mut self,
+        index: String,
+        bounds: String,
+        iterator: F,
+    ) -> Result<(), BuntDBError>
+    where
+        F: Fn(String, String) -> bool,
+    {
+        todo!()
+    }
+
+    // Len returns the number of items in the database
+    fn len(&self) -> Result<i64, BuntDBError> {
+        todo!()
+    }
+}
+
+// SetOptions represents options that may be included with the Set() command.
+struct SetOptions {
+    // Expires indicates that the Set() key-value will expire
+    expires: bool,
+    // TTL is how much time the key-value will exist in the database
+    // before being evicted. The Expires field must also be set to true.
+    // TTL stands for Time-To-Live.
+    ttl: time::Duration,
+}
+
+// rect is used by Intersects and Nearby
+struct Rect {
+    min: Vec<f64>,
+    max: Vec<f64>,
 }
