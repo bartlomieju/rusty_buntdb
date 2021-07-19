@@ -260,8 +260,36 @@ impl Db {
     /// writes, but not reads. This can be used for snapshots and backups for pure
     /// in-memory databases using the ":memory:". Database that persist to disk
     /// can be snapshotted by simply copying the database file.
-    pub fn save(&mut self, writer: &dyn io::Write) -> Result<(), io::Error> {
-        todo!();
+    pub fn save(&mut self, writer: &mut dyn io::Write) -> Result<(), io::Error> {
+        let _g = self.mu.read().unwrap();
+        let mut err = None;
+        // use a buffered writer and flush every 4MB
+        let mut buf = Vec::with_capacity(4 * 1024 * 1024);
+        // iterate through every item in the database and write to the buffer
+        btree_ascend(&self.keys, &|item| {
+            // TODO: write to buffer
+
+            if buf.len() > 4 * 1024 * 1024 {
+                // flush when buffer is over 4MB
+                if let Err(e) = writer.write_all(&buf) {
+                    err = Some(e);
+                    return false;
+                }
+                buf.clear();
+            }
+            return true;
+        });
+
+        if let Some(e) = err {
+            return Err(e);
+        }
+
+        // one final flush
+        if buf.len() > 0 {
+            writer.write_all(&buf)?;
+        }
+
+        Ok(())
     }
 
     /// `read_load` reads from the reader and loads commands into the database.
@@ -671,8 +699,8 @@ impl Index {
             // self.rtr =
         }
         // iterate through all keys and fill the index
-        // TODO:
-        // btree_ascend(self.db.keys, Arc::new(|item| {
+        // TODO: need to add `db` field
+        // btree_ascend(&self.db.keys, &|item| {
         //     if !self.matches(&item.key) {
         //         // does not match the pattern continue
         //         return true
@@ -685,7 +713,7 @@ impl Index {
         //         // self.rtr
         //     }
         //     return true;
-        // }))
+        // })
     }
 }
 
@@ -1375,7 +1403,7 @@ struct Rect {
     max: Vec<f64>,
 }
 
-fn btree_ascend<T>(tr: BTree<T>, iter: Arc<dyn Fn(T) -> bool>) {
+fn btree_ascend<T>(tr: &BTree<T>, iter: &dyn FnMut(T) -> bool) {
     tr.ascend(None, iter)
 }
 

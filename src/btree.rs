@@ -142,7 +142,7 @@ impl<T> BTree<T> {
     // Ascend the tree within the range [pivot, last]
     // Pass nil for pivot to scan all item in ascending order
     // Return false to stop iterating
-    pub fn ascend(&self, pivot: Option<T>, iter: Arc<dyn Fn(T) -> bool>) {
+    pub fn ascend(&self, pivot: Option<T>, iter: &dyn FnMut(T) -> bool) {
         todo!()
     }
 
