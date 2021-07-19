@@ -11,7 +11,7 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
 use std::sync::RwLock;
-use std::time::SystemTime;
+use std::time;
 
 #[derive(Debug)]
 pub enum BuntDBError {
@@ -264,7 +264,7 @@ impl DB {
     pub fn read_load(
         &self,
         _reader: &dyn io::Read,
-        _mod_time: SystemTime,
+        _mod_time: time::SystemTime,
     ) -> (u64, Option<io::Error>) {
         todo!();
     }
@@ -309,7 +309,7 @@ impl DB {
             return Err(err);
         }
 
-        let (_, maybe_err) = self.read_load(reader, SystemTime::now());
+        let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
 
         if let Some(err) = maybe_err {
             return Err(err);
@@ -426,6 +426,61 @@ impl DB {
     pub fn insert_into_database(&mut self, item: DbItem) -> DbItem {
         todo!();
     }
+
+    /// deleteFromDatabase removes and item from the database and indexes. The input
+    /// item must only have the key field specified thus "&dbItem{key: key}" is all
+    /// that is needed to fully remove the item with the matching key. If an item
+    /// with the matching key was found in the database, it will be removed and
+    /// returned to the caller. A nil return value means that the item was not
+    /// found in the database
+    pub fn delete_from_database(&mut self, item: DbItem) -> DbItem {
+        todo!()
+    }
+
+    /// backgroundManager runs continuously in the background and performs various
+    /// operations such as removing expired items and syncing to disk.
+    fn background_manager() {
+        todo!()
+    }
+
+    /// Shrink will make the database file smaller by removing redundant
+    /// log entries. This operation does not block the database.
+    fn shrink() {
+        todo!()
+    }
+
+    /// managed calls a block of code that is fully contained in a transaction.
+    /// This method is intended to be wrapped by Update and View
+    fn managed() {
+        todo!()
+    }
+
+    /// View executes a function within a managed read-only transaction.
+    /// When a non-nil error is returned from the function that error will be return
+    /// to the caller of View().
+    ///
+    /// Executing a manual commit or rollback from inside the function will result
+    /// in a panic.
+    pub fn view() {
+        todo!()
+    }
+
+    /// Update executes a function within a managed read/write transaction.
+    /// The transaction has been committed when no error is returned.
+    /// In the event that an error is returned, the transaction will be rolled back.
+    /// When a non-nil error is returned from the function, the transaction will be
+    /// rolled back and the that error will be return to the caller of Update().
+    ///
+    /// Executing a manual commit or rollback from inside the function will result
+    /// in a panic.
+    pub fn update() {
+        todo!()
+    }
+
+    /// get return an item or nil if not found.
+    pub fn get(&self, key: String) -> Option<DbItem> {
+        todo!()
+    }
 }
 
 /// `IndexOptions` provides an index with additional features or
@@ -527,8 +582,7 @@ pub struct DbItemOpts {
     /// does this item expire?
     ex: bool,
     /// when does this item expire?
-    // TODO: probably wrong type?
-    exat: SystemTime,
+    exat: time::Instant,
 }
 
 pub struct DbItem {
@@ -537,7 +591,33 @@ pub struct DbItem {
     // the binary value
     val: String,
     // optional meta information
-    opts: DbItemOpts,
+    opts: Option<DbItemOpts>,
     // keyless item for scanning
     keyless: bool,
+}
+
+impl DbItem {
+    // expired evaluates id the item has expired. This will always return false when
+    // the item does not have `opts.ex` set to true.
+    fn expired(&self) -> bool {
+        if let Some(opts) = &self.opts {
+            return opts.ex && opts.exat < time::Instant::now();
+        }
+
+        false
+    }
+
+    // expiresAt will return the time when the item will expire. When an item does
+    // not expire `maxTime` is used.
+    // fn expires_at(&self) -> Instant {
+    //     if let Some(opts) = &self.opts {
+    //         if !opts.ex {
+    //             return max_time;
+    //         }
+
+    //         opts.exat
+    //     }
+
+    //     max_time
+    // }
 }
