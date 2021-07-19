@@ -5,13 +5,16 @@
 
 #![allow(unused)]
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time;
 
@@ -88,10 +91,10 @@ pub struct DB {
     buf: Vec<u8>,
 
     /// a tree of all item ordered by key
-    // keys:      *btree.BTree,
+    keys: BTreeSet<OrdByKeyItem>,
 
     /// a tree of items ordered by expiration
-    // exps:      *btree.BTree,
+    exps: BTreeSet<OrdByExpItem>,
 
     /// the index trees.
     idxs: HashMap<String, Index>,
@@ -199,10 +202,8 @@ impl DB {
             mu: RwLock::new(()),
             file: None,
             buf: Vec::new(),
-
-            // TODO:
-            // keys: ,
-            // exps: ,
+            keys: BTreeSet::new(),
+            exps: BTreeSet::new(),
             idxs: HashMap::new(),
             ins_idxs: Vec::new(),
             flushes: 0,
@@ -643,7 +644,42 @@ impl Index {
     }
 }
 
+#[derive(Eq, PartialEq)]
+struct OrdByKeyItem {
+    item: Arc<DbItem>,
+}
+
+impl Ord for OrdByKeyItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.item.key.cmp(&other.item.key)
+    }
+}
+
+impl PartialOrd for OrdByKeyItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Eq, PartialEq)]
+struct OrdByExpItem {
+    item: Arc<DbItem>,
+}
+
+impl Ord for OrdByExpItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.item.expires_at().cmp(&other.item.expires_at())
+    }
+}
+
+impl PartialOrd for OrdByExpItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// DbItemOpts holds various meta information about an item.
+#[derive(Eq, PartialEq)]
 pub struct DbItemOpts {
     /// does this item expire?
     ex: bool,
@@ -651,6 +687,7 @@ pub struct DbItemOpts {
     exat: time::Instant,
 }
 
+#[derive(Eq, PartialEq)]
 pub struct DbItem {
     // the binary key
     key: String,
@@ -675,17 +712,18 @@ impl DbItem {
 
     // expiresAt will return the time when the item will expire. When an item does
     // not expire `maxTime` is used.
-    // fn expires_at(&self) -> Instant {
-    //     if let Some(opts) = &self.opts {
-    //         if !opts.ex {
-    //             return max_time;
-    //         }
+    fn expires_at(&self) -> time::Instant {
+        todo!()
+        //     if let Some(opts) = &self.opts {
+        //         if !opts.ex {
+        //             return max_time;
+        //         }
 
-    //         opts.exat
-    //     }
+        //         opts.exat
+        //     }
 
-    //     max_time
-    // }
+        //     max_time
+    }
 }
 
 // Tx represents a transaction on the database. This transaction can either be
