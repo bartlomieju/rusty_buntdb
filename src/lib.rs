@@ -488,12 +488,11 @@ impl DB {
     {
         let mut tx = self.begin(writable)?;
         tx.funcd = true;
-
         let func_result = func(&mut tx);
+        tx.funcd = false;
         if let Err(err) = func_result {
             // The caller returned an error. We must rollback;
             let _ = tx.rollback();
-            tx.funcd = false;
             return Err(err);
         }
         let rt = func_result.unwrap();
@@ -505,7 +504,6 @@ impl DB {
             // read-only transaction can only roll back
             tx.rollback()
         };
-        tx.funcd = false;
         result.map(|_| rt)
     }
 
@@ -585,7 +583,6 @@ struct IndexOptions {
 /// `Index` represents a b-tree or r-tree index and also acts as the
 /// b-tree/r-tree context for itself.
 struct Index {
-    // TODO: this should be an option
     // contains the items
     btr: Option<BTreeMap<String, String>>,
 
@@ -611,25 +608,24 @@ struct Index {
 }
 
 impl Index {
-    pub fn r#match(&self, key: &str) -> bool {
-        let mut key = key;
+    pub fn matches(&self, key: &str) -> bool {
+        let mut key = key.to_string();
         if self.pattern == "*" {
             return true;
         }
 
-        todo!()
+        if self.opts.case_insensitive_key_matching {
+            let mut chars_iter = key.chars();
+            while let Some(char_) = chars_iter.next() {
+                if char_ >= 'A' && char_ <= 'Z' {
+                    key = key.to_lowercase();
+                    break;
+                }
+            }
+        }
 
-        // if self.opts.case_insensitive_key_matching {
-        //     let len = key.len();
-        //     for i in 0..len {
-        //         if key.get(i).unwrap() >= 'A' && key.get(i).unwrap() <= 'Z' {
-        //             key = &key.to_lowercase();
-        //             break;
-        //         }
-        //     }
-        // }
-
-        // self.pattern.matches(key).peekable().peek().is_some()
+        // TODO: need to port https://github.com/tidwall/match package
+        self.pattern.matches(&key).peekable().peek().is_some()
     }
 
     // `clear_copy` creates a copy of the index, but with an empty dataset.
@@ -645,17 +641,14 @@ impl Index {
             opts: self.opts.clone(),
         };
 
-        // TODO:
         // initialize with empty trees
-        // if nidx.less != nil {
-        //     nidx.btr = btree.New(lessCtx(nidx))
-        // }
-        // if nidx.rect != nil {
-        //     nidx.rtr = rtred.New(nidx)
-        // }
-
-        if nidx.opts.case_insensitive_key_matching {
-            //
+        if nidx.less.is_some() {
+            // TODO:
+            // nidx.btr = btree.New(lessCtx(nidx))
+        }
+        if nidx.rect.is_some() {
+            // TODO:
+            // nidx.rtr = rtred.New(nidx)
         }
 
         nidx
