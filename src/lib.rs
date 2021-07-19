@@ -3,6 +3,8 @@
 //! readers and a single writer. Bunt is ideal for projects that need a
 //! dependable database, and favor speed over data size.
 
+#![allow(unused)]
+
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::error::Error;
@@ -83,7 +85,7 @@ pub struct DB {
     file: Option<File>,
 
     /// a buffer to write to
-    // buf:       []byte,
+    buf: Vec<u8>,
 
     /// a tree of all item ordered by key
     // keys:      *btree.BTree,
@@ -95,7 +97,7 @@ pub struct DB {
     idxs: HashMap<String, Index>,
 
     /// a reuse buffer for gathering indexes
-    // insIdxs:   []*index,
+    ins_idxs: Vec<Index>,
 
     /// a count of the number of disk flushes
     flushes: i64,
@@ -140,6 +142,9 @@ impl Default for SyncPolicy {
     }
 }
 
+pub type OnExpiredFn = &'static dyn for<'e> Fn(Vec<String>);
+pub type OnExpiredSyncFn = &'static dyn for<'e> Fn(String, String, &mut Tx) -> Result<(), DBError>;
+
 // Config represents database configuration options. These
 // options are used to change various behaviors of the database.
 #[derive(Clone, Default)]
@@ -163,16 +168,17 @@ pub struct Config {
 
     // auto_shrink_disabled turns off automatic background shrinking
     auto_shrink_disabled: bool,
+
     // `on_expired` is used to custom handle the deletion option when a key
     // has been expired.
-    // on_expired: func(keys []string),
+    on_expired: Option<OnExpiredFn>,
 
     // `on_expired_sync` will be called inside the same transaction that is
     // performing the deletion of expired items. If OnExpired is present then
     // this callback will not be called. If this callback is present, then the
     // deletion of the timeed-out item is the explicit responsibility of this
     // callback.
-    // on_expired_sync: func(key, value string, tx *Tx) error,
+    on_expired_sync: Option<OnExpiredSyncFn>,
 }
 
 // `ExCtx` is a simple b-tree context for ordering by expiration.
@@ -192,12 +198,13 @@ impl DB {
         let mut db = DB {
             mu: RwLock::new(()),
             file: None,
+            buf: Vec::new(),
 
             // TODO:
-            // buf: ,
+            // keys: ,
             // exps: ,
             idxs: HashMap::new(),
-            // insIdxs: ,
+            ins_idxs: Vec::new(),
             flushes: 0,
             closed: false,
             config,
@@ -567,10 +574,10 @@ struct Index {
     pattern: String,
 
     /// less comparison function
-    // less: Box<dyn Fn(String, String) -> bool>,
+    // less: Option<Box<dyn Fn(String, String) -> bool>>,
 
     /// rect from string function
-    // rect:    func(item string) (min, max []float64)
+    // rect: Option<Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
 
     /// the origin database
     // db: DB,
@@ -689,7 +696,7 @@ impl DbItem {
 // All transactions must be committed or rolled-back when done.
 // TODO: this lifetime makes no sense - we clear db option when transaction
 // is no longer valid - it should be an arc<mutex<>> or something like this
-struct Tx<'db> {
+pub struct Tx<'db> {
     /// the underlying database.
     db: Option<&'db mut DB>,
     /// when false mutable operations fail.
@@ -701,7 +708,7 @@ struct Tx<'db> {
 }
 
 #[derive(Default)]
-struct TxWriteContext {
+pub struct TxWriteContext {
     // rollback when deleteAll is called
     // a tree of all item ordered by key
     // rbkeys *btree.BTree
