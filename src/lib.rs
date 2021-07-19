@@ -393,8 +393,8 @@ impl DB {
         name: String,
         pattern: String,
         rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
-    ) -> Result<(), io::Error> {
-        todo!()
+    ) -> Result<(), DBError> {
+        self.update(|tx| tx.create_spatial_index(name, pattern, rect))
     }
 
     // ReplaceSpatialIndex builds a new index and populates it with items.
@@ -406,18 +406,29 @@ impl DB {
         name: String,
         pattern: String,
         rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
-    ) -> Result<(), io::Error> {
-        todo!()
+    ) -> Result<(), DBError> {
+        self.update(move |tx| {
+            if let Err(err) = tx.create_spatial_index(name.clone(), pattern.clone(), rect.clone()) {
+                if err == DBError::IndexExists {
+                    if let Err(err) = tx.drop_index(name.clone()) {
+                        return Err(err);
+                    }
+                    return tx.create_spatial_index(name, pattern, rect);
+                }
+                return Err(err);
+            }
+            Ok(())
+        })
     }
 
     /// DropIndex removes an index.
     pub fn drop_index(&mut self, name: String) -> Result<(), DBError> {
-        self.update(|tx: &mut Tx| tx.drop_index(name.clone()))
+        self.update(|tx| tx.drop_index(name.clone()))
     }
 
     /// Indexes returns a list of index names.
     pub fn indexes(&mut self) -> Result<Vec<String>, DBError> {
-        self.view(|tx: &mut Tx| tx.indexes())
+        self.view(|tx| tx.indexes())
     }
 
     /// ReadConfig returns the database configuration.
@@ -889,6 +900,41 @@ impl<'db> Tx<'db> {
         less: Vec<Arc<dyn Fn(String, String) -> bool>>,
     ) -> Result<(), DBError> {
         self.create_index_inner(name, pattern, less, None, Some(opts))
+    }
+
+    // CreateSpatialIndex builds a new index and populates it with items.
+    // The items are organized in an r-tree and can be retrieved using the
+    // Intersects method.
+    // An error will occur if an index with the same name already exists.
+    //
+    // The rect function converts a string to a rectangle. The rectangle is
+    // represented by two arrays, min and max. Both arrays may have a length
+    // between 1 and 20, and both arrays must match in length. A length of 1 is a
+    // one dimensional rectangle, and a length of 4 is a four dimension rectangle.
+    // There is support for up to 20 dimensions.
+    // The values of min must be less than the values of max at the same dimension.
+    // Thus min[0] must be less-than-or-equal-to max[0].
+    // The IndexRect is a default function that can be used for the rect
+    // parameter.
+    fn create_spatial_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+    ) -> Result<(), DBError> {
+        self.create_index_inner(name, pattern, vec![], Some(rect), None)
+    }
+
+    // CreateSpatialIndexOptions is the same as CreateSpatialIndex except that
+    // it allows for additional options.
+    fn create_spatial_index_options(
+        &mut self,
+        name: String,
+        pattern: String,
+        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+        opts: IndexOptions,
+    ) -> Result<(), DBError> {
+        self.create_index_inner(name, pattern, vec![], Some(rect), Some(opts))
     }
 
     fn drop_index(&mut self, name: String) -> Result<(), DBError> {
