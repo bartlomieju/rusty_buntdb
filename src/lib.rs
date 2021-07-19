@@ -97,10 +97,10 @@ pub struct DB {
     exps: BTreeSet<OrdByExpItem>,
 
     /// the index trees.
-    idxs: HashMap<String, Index>,
+    idxs: HashMap<String, Arc<Index>>,
 
     /// a reuse buffer for gathering indexes
-    ins_idxs: Vec<Index>,
+    ins_idxs: Vec<Arc<Index>>,
 
     /// a count of the number of disk flushes
     flushes: i64,
@@ -345,9 +345,9 @@ impl DB {
         &mut self,
         name: String,
         pattern: String,
-        less: Box<dyn Fn(String, String) -> bool>,
-    ) -> Result<(), io::Error> {
-        todo!()
+        less: Vec<Box<dyn Fn(String, String) -> bool>>,
+    ) -> Result<(), DBError> {
+        self.update(move |tx| tx.create_index(name, pattern, less))
     }
 
     /// ReplaceIndex builds a new index and populates it with items.
@@ -461,7 +461,7 @@ impl DB {
     /// This method is intended to be wrapped by Update and View
     fn managed<F, R>(&mut self, writable: bool, func: F) -> Result<R, DBError>
     where
-        F: Fn(&mut Tx) -> Result<R, DBError>,
+        F: FnOnce(&mut Tx) -> Result<R, DBError>,
     {
         let mut tx = self.begin(writable)?;
         tx.funcd = true;
@@ -494,7 +494,7 @@ impl DB {
     /// in a panic.
     pub fn view<F, R>(&mut self, func: F) -> Result<R, DBError>
     where
-        F: Fn(&mut Tx) -> Result<R, DBError>,
+        F: FnOnce(&mut Tx) -> Result<R, DBError>,
     {
         self.managed(false, func)
     }
@@ -509,7 +509,7 @@ impl DB {
     /// in a panic.
     pub fn update<F, R>(&mut self, func: F) -> Result<R, DBError>
     where
-        F: Fn(&mut Tx) -> Result<R, DBError>,
+        F: FnOnce(&mut Tx) -> Result<R, DBError>,
     {
         self.managed(true, func)
     }
@@ -552,7 +552,7 @@ impl DB {
 
 /// `IndexOptions` provides an index with additional features or
 /// alternate functionality.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct IndexOptions {
     /// `case_insensitive_key_matching` allow for case-insensitive
     /// matching on keys when setting key/values.
@@ -753,7 +753,7 @@ pub struct TxWriteContext {
     // a tree of items ordered by expiration
     // rbexps *btree.BTree
     // the index trees.
-    rbidxs: HashMap<String, Index>,
+    rbidxs: HashMap<String, Arc<Index>>,
 
     /// details for rolling back tx.
     rollback_items: HashMap<String, DbItem>,
@@ -762,7 +762,7 @@ pub struct TxWriteContext {
     // stack of iterators
     itercount: i64,
     // details for dropped indexes.
-    rollback_indexes: HashMap<String, Index>,
+    rollback_indexes: HashMap<String, Arc<Index>>,
 }
 
 impl<'db> Tx<'db> {
@@ -785,6 +785,99 @@ impl<'db> Tx<'db> {
         names.sort();
 
         Ok(names)
+    }
+
+    // createIndex is called by CreateIndex() and CreateSpatialIndex()
+    fn create_index_inner(
+        &mut self,
+        name: String,
+        pattern: String,
+        lessers: Vec<Box<dyn Fn(String, String) -> bool>>,
+        rect: Option<Box<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
+        opts: Option<IndexOptions>,
+    ) -> Result<(), DBError> {
+        if self.db.is_none() {
+            return Err(DBError::TxClosed);
+        } else if !self.writable {
+            return Err(DBError::TxNotWritable);
+        } else if self.wc.as_ref().unwrap().itercount > 0 {
+            return Err(DBError::TxIterating);
+        }
+
+        if name == "" {
+            // cannot create an index without a name.
+            // an empty name index is designated for the main "keys" tree.
+            return Err(DBError::IndexExists);
+        }
+
+        // check if an index with that name already exists
+        if self.db.as_ref().unwrap().idxs.contains_key(&name) {
+            // index with name already exists. error.
+            return Err(DBError::IndexExists);
+        }
+
+        // generate a less function
+        // TODO:
+
+        let mut pattern = pattern;
+        let options = opts.unwrap_or(IndexOptions::default());
+        if options.case_insensitive_key_matching {
+            pattern = pattern.to_lowercase();
+        }
+
+        let mut idx = Index {
+            btr: None,
+            name,
+            pattern,
+            opts: options,
+        };
+        idx.rebuild();
+        // save the index
+        self.db
+            .as_mut()
+            .unwrap()
+            .idxs
+            .insert(idx.name.clone(), Arc::new(idx));
+        // store the index in the rollback map.
+        // TODO
+
+        Ok(())
+    }
+
+    // CreateIndex builds a new index and populates it with items.
+    // The items are ordered in an b-tree and can be retrieved using the
+    // Ascend* and Descend* methods.
+    // An error will occur if an index with the same name already exists.
+    //
+    // When a pattern is provided, the index will be populated with
+    // keys that match the specified pattern. This is a very simple pattern
+    // match where '*' matches on any number characters and '?' matches on
+    // any one character.
+    // The less function compares if string 'a' is less than string 'b'.
+    // It allows for indexes to create custom ordering. It's possible
+    // that the strings may be textual or binary. It's up to the provided
+    // less function to handle the content format and comparison.
+    // There are some default less function that can be used such as
+    // IndexString, IndexBinary, etc.
+    fn create_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        less: Vec<Box<dyn Fn(String, String) -> bool>>,
+    ) -> Result<(), DBError> {
+        self.create_index_inner(name, pattern, less, None, None)
+    }
+
+    // CreateIndexOptions is the same as CreateIndex except that it allows
+    // for additional options.
+    fn create_index_options(
+        &mut self,
+        name: String,
+        pattern: String,
+        opts: IndexOptions,
+        less: Vec<Box<dyn Fn(String, String) -> bool>>,
+    ) -> Result<(), DBError> {
+        self.create_index_inner(name, pattern, less, None, Some(opts))
     }
 
     fn drop_index(&mut self, name: String) -> Result<(), DBError> {
