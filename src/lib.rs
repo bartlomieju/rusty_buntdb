@@ -597,10 +597,10 @@ struct Index {
     pattern: String,
 
     /// less comparison function
-    // less: Option<Arc<dyn Fn(String, String) -> bool>>,
+    less: Option<Arc<dyn Fn(String, String) -> bool>>,
 
     /// rect from string function
-    // rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
+    rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
 
     /// the origin database
     // db: DB,
@@ -639,8 +639,8 @@ impl Index {
             name: self.name.clone(),
             pattern: self.pattern.clone(),
             // db: self.db.clone(),
-            // less: self.less.clone(),
-            // rect: self.rect.clone(),
+            less: self.less.clone(),
+            rect: self.rect.clone(),
             opts: self.opts.clone(),
         };
 
@@ -839,7 +839,27 @@ impl<'db> Tx<'db> {
         }
 
         // generate a less function
-        // TODO:
+        let less = match lessers.len() {
+            // no less function
+            0 => None,
+            1 => Some(lessers[0].clone()),
+            _ => {
+                // FIXME: probably need to make it into a trait object
+                // let func = Arc::new(|a, b| {
+                //     for i in 0..lessers.len() {
+                //         if lessers[i](a, b) {
+                //             return true;
+                //         }
+                //         if lessers[i](b, a) {
+                //             return false;
+                //         }
+                //     }
+                //     lessers[lessers.len() - 1](a, b)
+                // });
+                // Some(func)
+                None
+            }
+        };
 
         let mut pattern = pattern;
         let options = opts.unwrap_or(IndexOptions::default());
@@ -851,6 +871,8 @@ impl<'db> Tx<'db> {
             btr: None,
             name,
             pattern,
+            less,
+            rect,
             opts: options,
         };
         idx.rebuild();
