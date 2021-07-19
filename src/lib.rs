@@ -181,7 +181,7 @@ struct ExCtx {
 }
 
 impl DB {
-    pub fn open(path: String) -> Result<DB, io::Error> {
+    pub fn open(path: &str) -> Result<DB, io::Error> {
         // initialize default configuration
         let config = Config {
             auto_shrink_percentage: 100,
@@ -1037,4 +1037,36 @@ struct SetOptions {
 struct Rect {
     min: Vec<f64>,
     max: Vec<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_open() -> DB {
+        std::fs::remove_file("data.db").unwrap();
+        test_reopen(None)
+    }
+
+    fn test_reopen(maybe_db: Option<DB>) -> DB {
+        test_reopen_delay(maybe_db, time::Duration::new(0, 0))
+    }
+
+    fn test_reopen_delay(maybe_db: Option<DB>, duration: time::Duration) -> DB {
+        if let Some(db) = maybe_db {
+            db.close().unwrap();
+        }
+        std::thread::sleep(duration);
+        DB::open("data.db").unwrap()
+    }
+
+    fn test_close(db: DB) {
+        let _ = db.close();
+        let _ = std::fs::remove_file("data.db");
+    }
+
+    #[test]
+    fn save_load() {
+        let db = DB::open(":memory:").unwrap();
+    }
 }
