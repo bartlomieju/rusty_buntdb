@@ -20,7 +20,7 @@ use std::sync::RwLock;
 use std::time;
 
 #[derive(Debug, PartialEq)]
-pub enum DBError {
+pub enum DbError {
     // ErrTxNotWritable is returned when performing a write operation on a
     // read-only transaction.
     TxNotWritable,
@@ -58,9 +58,9 @@ pub enum DBError {
     TxIterating,
 }
 
-impl fmt::Display for DBError {
+impl fmt::Display for DbError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use DBError::*;
+        use DbError::*;
         match self {
             TxNotWritable => write!(f, "tx not writable"),
             TxClosed => write!(f, "tx closed"),
@@ -77,11 +77,11 @@ impl fmt::Display for DBError {
     }
 }
 
-impl Error for DBError {}
+impl Error for DbError {}
 
-/// DB represents a collection of key-value pairs that persist on disk.
-/// Transactions are used for all forms of data access to the DB.
-pub struct DB {
+/// Db represents a collection of key-value pairs that persist on disk.
+/// Transactions are used for all forms of data access to the Db.
+pub struct Db {
     /// the gatekeeper for all fields
     mu: RwLock<()>,
 
@@ -147,7 +147,7 @@ impl Default for SyncPolicy {
 }
 
 pub type OnExpiredFn = &'static dyn for<'e> Fn(Vec<String>);
-pub type OnExpiredSyncFn = &'static dyn for<'e> Fn(String, String, &mut Tx) -> Result<(), DBError>;
+pub type OnExpiredSyncFn = &'static dyn for<'e> Fn(String, String, &mut Tx) -> Result<(), DbError>;
 
 // Config represents database configuration options. These
 // options are used to change various behaviors of the database.
@@ -187,11 +187,11 @@ pub struct Config {
 
 // `ExCtx` is a simple b-tree context for ordering by expiration.
 struct ExCtx {
-    db: DB,
+    db: Db,
 }
 
-impl DB {
-    pub fn open(path: &str) -> Result<DB, io::Error> {
+impl Db {
+    pub fn open(path: &str) -> Result<Db, io::Error> {
         // initialize default configuration
         let config = Config {
             auto_shrink_percentage: 100,
@@ -199,7 +199,7 @@ impl DB {
             ..Default::default()
         };
 
-        let mut db = DB {
+        let mut db = Db {
             mu: RwLock::new(()),
             file: None,
             buf: Vec::new(),
@@ -240,11 +240,11 @@ impl DB {
 
     /// `close` releases all database resources.
     /// All transactions must be closed before closing the database.
-    pub fn close(mut self) -> Result<(), DBError> {
+    pub fn close(mut self) -> Result<(), DbError> {
         let _g = self.mu.write().unwrap();
 
         if self.closed {
-            return Err(DBError::DatabaseClosed);
+            return Err(DbError::DatabaseClosed);
         }
 
         self.closed = true;
@@ -314,7 +314,7 @@ impl DB {
         let _g = self.mu.write().unwrap();
 
         if self.persist {
-            let err = io::Error::new(io::ErrorKind::Other, DBError::PersistenceActive);
+            let err = io::Error::new(io::ErrorKind::Other, DbError::PersistenceActive);
             return Err(err);
         }
 
@@ -347,7 +347,7 @@ impl DB {
         name: String,
         pattern: String,
         less: Vec<Arc<dyn Fn(String, String) -> bool>>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.update(move |tx| tx.create_index(name, pattern, less))
     }
 
@@ -360,10 +360,10 @@ impl DB {
         name: String,
         pattern: String,
         less: Vec<Arc<dyn Fn(String, String) -> bool>>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
-                if err == DBError::IndexExists {
+                if err == DbError::IndexExists {
                     if let Err(err) = tx.drop_index(name.clone()) {
                         return Err(err);
                     }
@@ -394,7 +394,7 @@ impl DB {
         name: String,
         pattern: String,
         rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.update(|tx| tx.create_spatial_index(name, pattern, rect))
     }
 
@@ -407,10 +407,10 @@ impl DB {
         name: String,
         pattern: String,
         rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_spatial_index(name.clone(), pattern.clone(), rect.clone()) {
-                if err == DBError::IndexExists {
+                if err == DbError::IndexExists {
                     if let Err(err) = tx.drop_index(name.clone()) {
                         return Err(err);
                     }
@@ -423,29 +423,29 @@ impl DB {
     }
 
     /// DropIndex removes an index.
-    pub fn drop_index(&mut self, name: String) -> Result<(), DBError> {
+    pub fn drop_index(&mut self, name: String) -> Result<(), DbError> {
         self.update(|tx| tx.drop_index(name.clone()))
     }
 
     /// Indexes returns a list of index names.
-    pub fn indexes(&mut self) -> Result<Vec<String>, DBError> {
+    pub fn indexes(&mut self) -> Result<Vec<String>, DbError> {
         self.view(|tx| tx.indexes())
     }
 
     /// ReadConfig returns the database configuration.
-    pub fn read_config(&self) -> Result<Config, DBError> {
+    pub fn read_config(&self) -> Result<Config, DbError> {
         let _g = self.mu.read().unwrap();
         if self.closed {
-            return Err(DBError::DatabaseClosed);
+            return Err(DbError::DatabaseClosed);
         }
         Ok(self.config.clone())
     }
 
     /// SetConfig updates the database configuration.
-    pub fn set_config(&mut self, config: Config) -> Result<(), DBError> {
+    pub fn set_config(&mut self, config: Config) -> Result<(), DbError> {
         let _g = self.mu.read().unwrap();
         if self.closed {
-            return Err(DBError::DatabaseClosed);
+            return Err(DbError::DatabaseClosed);
         }
         self.config = config;
         Ok(())
@@ -482,9 +482,9 @@ impl DB {
 
     /// managed calls a block of code that is fully contained in a transaction.
     /// This method is intended to be wrapped by Update and View
-    fn managed<F, R>(&mut self, writable: bool, func: F) -> Result<R, DBError>
+    fn managed<F, R>(&mut self, writable: bool, func: F) -> Result<R, DbError>
     where
-        F: FnOnce(&mut Tx) -> Result<R, DBError>,
+        F: FnOnce(&mut Tx) -> Result<R, DbError>,
     {
         let mut tx = self.begin(writable)?;
         tx.funcd = true;
@@ -513,9 +513,9 @@ impl DB {
     ///
     /// Executing a manual commit or rollback from inside the function will result
     /// in a panic.
-    pub fn view<F, R>(&mut self, func: F) -> Result<R, DBError>
+    pub fn view<F, R>(&mut self, func: F) -> Result<R, DbError>
     where
-        F: FnOnce(&mut Tx) -> Result<R, DBError>,
+        F: FnOnce(&mut Tx) -> Result<R, DbError>,
     {
         self.managed(false, func)
     }
@@ -528,9 +528,9 @@ impl DB {
     ///
     /// Executing a manual commit or rollback from inside the function will result
     /// in a panic.
-    pub fn update<F, R>(&mut self, func: F) -> Result<R, DBError>
+    pub fn update<F, R>(&mut self, func: F) -> Result<R, DbError>
     where
-        F: FnOnce(&mut Tx) -> Result<R, DBError>,
+        F: FnOnce(&mut Tx) -> Result<R, DbError>,
     {
         self.managed(true, func)
     }
@@ -547,7 +547,7 @@ impl DB {
     // the current read/write transaction is completed.
     //
     // All transactions must be closed by calling Commit() or Rollback() when done.
-    fn begin(&mut self, writable: bool) -> Result<Tx, DBError> {
+    fn begin(&mut self, writable: bool) -> Result<Tx, DbError> {
         let mut tx = Tx {
             db: Some(self),
             writable,
@@ -560,7 +560,7 @@ impl DB {
         if tx.db.as_ref().unwrap().closed {
             // TODO:
             // tx.unlock();
-            return Err(DBError::DatabaseClosed);
+            return Err(DbError::DatabaseClosed);
         }
 
         if writable {
@@ -601,7 +601,7 @@ struct Index {
     rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
 
     /// the origin database
-    // db: DB,
+    // db: Db,
 
     /// index options
     opts: IndexOptions,
@@ -759,7 +759,7 @@ impl DbItem {
 // is no longer valid - it should be an arc<mutex<>> or something like this
 pub struct Tx<'db> {
     /// the underlying database.
-    db: Option<&'db mut DB>,
+    db: Option<&'db mut Db>,
     /// when false mutable operations fail.
     writable: bool,
     /// when true Commit and Rollback panic.
@@ -794,9 +794,9 @@ impl<'db> Tx<'db> {
         todo!()
     }
 
-    fn indexes(&self) -> Result<Vec<String>, DBError> {
+    fn indexes(&self) -> Result<Vec<String>, DbError> {
         if self.db.is_none() {
-            return Err(DBError::TxClosed);
+            return Err(DbError::TxClosed);
         }
 
         let db = self.db.as_ref().unwrap();
@@ -818,25 +818,25 @@ impl<'db> Tx<'db> {
         lessers: Vec<Arc<dyn Fn(String, String) -> bool>>,
         rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
         opts: Option<IndexOptions>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         if self.db.is_none() {
-            return Err(DBError::TxClosed);
+            return Err(DbError::TxClosed);
         } else if !self.writable {
-            return Err(DBError::TxNotWritable);
+            return Err(DbError::TxNotWritable);
         } else if self.wc.as_ref().unwrap().itercount > 0 {
-            return Err(DBError::TxIterating);
+            return Err(DbError::TxIterating);
         }
 
         if name == "" {
             // cannot create an index without a name.
             // an empty name index is designated for the main "keys" tree.
-            return Err(DBError::IndexExists);
+            return Err(DbError::IndexExists);
         }
 
         // check if an index with that name already exists
         if self.db.as_ref().unwrap().idxs.contains_key(&name) {
             // index with name already exists. error.
-            return Err(DBError::IndexExists);
+            return Err(DbError::IndexExists);
         }
 
         // generate a less function
@@ -909,7 +909,7 @@ impl<'db> Tx<'db> {
         name: String,
         pattern: String,
         less: Vec<Arc<dyn Fn(String, String) -> bool>>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, None)
     }
 
@@ -921,7 +921,7 @@ impl<'db> Tx<'db> {
         pattern: String,
         opts: IndexOptions,
         less: Vec<Arc<dyn Fn(String, String) -> bool>>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, Some(opts))
     }
 
@@ -944,7 +944,7 @@ impl<'db> Tx<'db> {
         name: String,
         pattern: String,
         rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, vec![], Some(rect), None)
     }
 
@@ -956,27 +956,27 @@ impl<'db> Tx<'db> {
         pattern: String,
         rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
         opts: IndexOptions,
-    ) -> Result<(), DBError> {
+    ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, vec![], Some(rect), Some(opts))
     }
 
-    fn drop_index(&mut self, name: String) -> Result<(), DBError> {
+    fn drop_index(&mut self, name: String) -> Result<(), DbError> {
         if self.db.is_none() {
-            return Err(DBError::TxClosed);
+            return Err(DbError::TxClosed);
         } else if !self.writable {
-            return Err(DBError::TxNotWritable);
+            return Err(DbError::TxNotWritable);
         } else if self.wc.as_ref().unwrap().itercount > 0 {
-            return Err(DBError::TxIterating);
+            return Err(DbError::TxIterating);
         }
 
         if name == "" {
             // cannot drop the default "keys" index
-            return Err(DBError::InvalidOperation);
+            return Err(DbError::InvalidOperation);
         }
 
         let maybe_idx = self.db.as_mut().unwrap().idxs.remove(&name);
         if maybe_idx.is_none() {
-            return Err(DBError::NotFound);
+            return Err(DbError::NotFound);
         }
         let idx = maybe_idx.unwrap();
         // TODO:
@@ -1015,7 +1015,7 @@ impl<'db> Tx<'db> {
     // Commit writes all changes to disk.
     // An error is returned when a write error occurs, or when a Commit() is called
     // from a read-only transaction.
-    fn commit(&mut self) -> Result<(), DBError> {
+    fn commit(&mut self) -> Result<(), DbError> {
         todo!()
     }
 
@@ -1023,7 +1023,7 @@ impl<'db> Tx<'db> {
     // were performed on the transaction such as Set() and Delete().
     //
     // Read-only transactions can only be rolled back, not committed.
-    fn rollback(&mut self) -> Result<(), DBError> {
+    fn rollback(&mut self) -> Result<(), DbError> {
         todo!()
     }
 
@@ -1031,7 +1031,7 @@ impl<'db> Tx<'db> {
     // doing ad-hoc compares inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no less
     // function bound to the index
-    fn get_less(&self, index: String) -> Result<(), DBError> {
+    fn get_less(&self, index: String) -> Result<(), DbError> {
         todo!()
     }
 
@@ -1039,7 +1039,7 @@ impl<'db> Tx<'db> {
     // doing ad-hoc searches inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no rect
     // function bound to the index
-    fn get_rect(&self, index: String) -> Result<(), DBError> {
+    fn get_rect(&self, index: String) -> Result<(), DbError> {
         todo!()
     }
 
@@ -1070,14 +1070,14 @@ impl<'db> Tx<'db> {
     //
     // Only a writable transaction can be used for this operation.
     // This operation is not allowed during iterations such as Ascend* & Descend*.
-    fn delete(&mut self, key: String) -> Result<String, DBError> {
+    fn delete(&mut self, key: String) -> Result<String, DbError> {
         todo!()
     }
 
     // TTL returns the remaining time-to-live for an item.
     // A negative duration will be returned for items that do not have an
     // expiration.
-    fn ttl(&mut self, key: String) -> Result<time::Duration, DBError> {
+    fn ttl(&mut self, key: String) -> Result<time::Duration, DbError> {
         todo!()
     }
 
@@ -1100,7 +1100,7 @@ impl<'db> Tx<'db> {
         start: String,
         stop: String,
         iterator: F,
-    ) -> Result<(), DBError>
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1108,7 +1108,7 @@ impl<'db> Tx<'db> {
     }
 
     // AscendKeys allows for iterating through keys based on the specified pattern.
-    fn ascend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DBError>
+    fn ascend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1116,7 +1116,7 @@ impl<'db> Tx<'db> {
     }
 
     // DescendKeys allows for iterating through keys based on the specified pattern.
-    fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DBError>
+    fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1129,7 +1129,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), DBError>
+    fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1147,7 +1147,7 @@ impl<'db> Tx<'db> {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), DBError>
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1165,7 +1165,7 @@ impl<'db> Tx<'db> {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), DBError>
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1184,7 +1184,7 @@ impl<'db> Tx<'db> {
         greater_or_equal: String,
         less_than: String,
         iterator: F,
-    ) -> Result<(), DBError>
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1197,7 +1197,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend<F>(&mut self, index: String, iterator: F) -> Result<(), DBError>
+    fn descend<F>(&mut self, index: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1215,7 +1215,7 @@ impl<'db> Tx<'db> {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), DBError>
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1233,7 +1233,7 @@ impl<'db> Tx<'db> {
         index: String,
         pivot: String,
         iterator: F,
-    ) -> Result<(), DBError>
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1252,7 +1252,7 @@ impl<'db> Tx<'db> {
         less_or_equal: String,
         greater_than: String,
         iterator: F,
-    ) -> Result<(), DBError>
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1265,7 +1265,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DBError>
+    fn ascend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1278,7 +1278,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DBError>
+    fn descend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1294,7 +1294,7 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     // The dist param is the distance of the bounding boxes. In the case of
     // simple 2D points, it's the distance of the two 2D points squared.
-    fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DBError>
+    fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String, f64) -> bool,
     {
@@ -1306,7 +1306,7 @@ impl<'db> Tx<'db> {
     // is represented by the rect string. This string will be processed by the
     // same bounds function that was passed to the CreateSpatialIndex() function.
     // An invalid index will return an error.
-    fn intersects<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DBError>
+    fn intersects<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1314,7 +1314,7 @@ impl<'db> Tx<'db> {
     }
 
     // Len returns the number of items in the database
-    fn len(&self) -> Result<i64, DBError> {
+    fn len(&self) -> Result<i64, DbError> {
         todo!()
     }
 }
@@ -1339,30 +1339,30 @@ struct Rect {
 mod tests {
     use super::*;
 
-    fn test_open() -> DB {
+    fn test_open() -> Db {
         std::fs::remove_file("data.db").unwrap();
         test_reopen(None)
     }
 
-    fn test_reopen(maybe_db: Option<DB>) -> DB {
+    fn test_reopen(maybe_db: Option<Db>) -> Db {
         test_reopen_delay(maybe_db, time::Duration::new(0, 0))
     }
 
-    fn test_reopen_delay(maybe_db: Option<DB>, duration: time::Duration) -> DB {
+    fn test_reopen_delay(maybe_db: Option<Db>, duration: time::Duration) -> Db {
         if let Some(db) = maybe_db {
             db.close().unwrap();
         }
         std::thread::sleep(duration);
-        DB::open("data.db").unwrap()
+        Db::open("data.db").unwrap()
     }
 
-    fn test_close(db: DB) {
+    fn test_close(db: Db) {
         let _ = db.close();
         let _ = std::fs::remove_file("data.db");
     }
 
     #[test]
     fn save_load() {
-        let db = DB::open(":memory:").unwrap();
+        let db = Db::open(":memory:").unwrap();
     }
 }
