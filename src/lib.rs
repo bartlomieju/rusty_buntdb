@@ -5,6 +5,7 @@
 
 #![allow(unused)]
 
+use once_cell::sync::OnceCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -721,6 +722,14 @@ pub struct DbItem {
     keyless: bool,
 }
 
+// This is a long time in the future. It's an imaginary number that is
+// used for b-tree ordering.
+static MAX_TIME: OnceCell<time::Instant> = OnceCell::new();
+
+fn get_max_time() -> time::Instant {
+    *MAX_TIME.get_or_init(|| time::Instant::now() + time::Duration::MAX)
+}
+
 impl DbItem {
     // expired evaluates id the item has expired. This will always return false when
     // the item does not have `opts.ex` set to true.
@@ -735,16 +744,15 @@ impl DbItem {
     // expiresAt will return the time when the item will expire. When an item does
     // not expire `maxTime` is used.
     fn expires_at(&self) -> time::Instant {
-        todo!()
-        //     if let Some(opts) = &self.opts {
-        //         if !opts.ex {
-        //             return max_time;
-        //         }
+        if let Some(opts) = &self.opts {
+            if !opts.ex {
+                return get_max_time();
+            }
 
-        //         opts.exat
-        //     }
+            return opts.exat;
+        }
 
-        //     max_time
+        get_max_time()
     }
 }
 
@@ -774,9 +782,9 @@ pub struct TxWriteContext {
     // rbkeys *btree.BTree
     // a tree of items ordered by expiration
     // rbexps *btree.BTree
+
     // the index trees.
     rbidxs: HashMap<String, Arc<Index>>,
-
     /// details for rolling back tx.
     rollback_items: HashMap<String, DbItem>,
     // details for committing tx.
