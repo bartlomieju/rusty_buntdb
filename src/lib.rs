@@ -6,9 +6,6 @@
 #![allow(unused)]
 
 use once_cell::sync::OnceCell;
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -204,8 +201,8 @@ impl Db {
             mu: RwLock::new(()),
             file: None,
             buf: Vec::new(),
-            keys: BTree::new(less_ctx()),
-            exps: BTree::new(less_ctx()),
+            keys: BTree::new(make_db_item_less(Arc::new(|_, _| None))),
+            exps: BTree::new(make_db_item_less(Arc::new(exctx_less))),
             idxs: HashMap::new(),
             ins_idxs: Vec::new(),
             flushes: 0,
@@ -638,7 +635,7 @@ impl Index {
     // `clear_copy` creates a copy of the index, but with an empty dataset.
     pub fn clear_copy(&self) -> Index {
         // copy the index meta information
-        let nidx = Index {
+        let mut nidx = Index {
             btr: None,
             name: self.name.clone(),
             pattern: self.pattern.clone(),
@@ -651,7 +648,8 @@ impl Index {
         // initialize with empty trees
         if nidx.less.is_some() {
             // TODO:
-            // nidx.btr = btree.New(lessCtx(nidx))
+            let index_less_fn = index_less(nidx.less.clone().unwrap());
+            nidx.btr = Some(BTree::new(make_db_item_less(index_less_fn)));
         }
         if nidx.rect.is_some() {
             // TODO:
@@ -691,6 +689,33 @@ impl Index {
     }
 }
 
+fn exctx_less(a: &DbItem, b: &DbItem) -> Option<bool> {
+    // The expires b-tree formula
+    if b.expires_at() > a.expires_at() {
+        return Some(true);
+    }
+    if a.expires_at() > b.expires_at() {
+        return Some(false);
+    }
+    None
+}
+
+fn index_less(
+    less: Arc<dyn Fn(String, String) -> bool>,
+) -> Arc<dyn Fn(&DbItem, &DbItem) -> Option<bool>> {
+    Arc::new(move |a, b| {
+        // TODO: remove these clones
+        if less(a.val.clone(), b.val.clone()) {
+            return Some(true);
+        }
+        if less(b.val.clone(), a.val.clone()) {
+            return Some(false);
+        }
+
+        None
+    })
+}
+
 fn make_db_item_less(
     func: Arc<dyn Fn(&DbItem, &DbItem) -> Option<bool>>,
 ) -> Arc<dyn Fn(DbItem, DbItem) -> bool> {
@@ -706,40 +731,6 @@ fn make_db_item_less(
         }
         return a.key < b.key;
     })
-}
-
-#[derive(Eq, PartialEq)]
-struct OrdByKeyItem {
-    item: Arc<DbItem>,
-}
-
-impl Ord for OrdByKeyItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.item.key.cmp(&other.item.key)
-    }
-}
-
-impl PartialOrd for OrdByKeyItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[derive(Eq, PartialEq)]
-struct OrdByExpItem {
-    item: Arc<DbItem>,
-}
-
-impl Ord for OrdByExpItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.item.expires_at().cmp(&other.item.expires_at())
-    }
-}
-
-impl PartialOrd for OrdByExpItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 /// DbItemOpts holds various meta information about an item.
