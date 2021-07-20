@@ -19,6 +19,8 @@ use std::time;
 mod btree;
 use btree::BTree;
 
+type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
+
 #[derive(Debug, PartialEq)]
 pub enum DbError {
     // ErrTxNotWritable is returned when performing a write operation on a
@@ -277,7 +279,8 @@ impl Db {
                 }
                 buf.clear();
             }
-            return true;
+
+            true
         });
 
         if let Some(e) = err {
@@ -285,7 +288,7 @@ impl Db {
         }
 
         // one final flush
-        if buf.len() > 0 {
+        if !buf.is_empty() {
             writer.write_all(&buf)?;
         }
 
@@ -310,7 +313,7 @@ impl Db {
     /// http://redis.io/topics/protocol. The only supported RESP commands are DEL and
     /// SET.
     fn load_from_disk(&mut self) -> Result<(), io::Error> {
-        let mut file = self.file.as_ref().unwrap().clone();
+        let mut file = &(*self.file.as_ref().unwrap());
         let metadata = file.metadata()?;
         let mod_time = metadata.modified()?;
 
@@ -419,7 +422,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+        rect: RectFn,
     ) -> Result<(), DbError> {
         self.update(|tx| tx.create_spatial_index(name, pattern, rect))
     }
@@ -432,7 +435,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+        rect: RectFn,
     ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_spatial_index(name.clone(), pattern.clone(), rect.clone()) {
@@ -630,7 +633,7 @@ struct Index {
     less: Option<Arc<dyn Fn(String, String) -> bool>>,
 
     /// rect from string function
-    rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
+    rect: Option<RectFn>,
 
     /// the origin database
     // db: Arc<Db>,
@@ -648,8 +651,8 @@ impl Index {
 
         if self.opts.case_insensitive_key_matching {
             let mut chars_iter = key.chars();
-            while let Some(char_) = chars_iter.next() {
-                if char_ >= 'A' && char_ <= 'Z' {
+            for char_ in chars_iter {
+                if ('A'..='Z').contains(&char_) {
                     key = key.to_lowercase();
                     break;
                 }
@@ -757,7 +760,7 @@ fn make_db_item_less(
         } else if b.keyless {
             return true;
         }
-        return a.key < b.key;
+        a.key < b.key
     })
 }
 
@@ -883,7 +886,7 @@ impl<'db> Tx<'db> {
         name: String,
         pattern: String,
         lessers: Vec<Arc<dyn Fn(String, String) -> bool>>,
-        rect: Option<Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>>,
+        rect: Option<RectFn>,
         opts: Option<IndexOptions>,
     ) -> Result<(), DbError> {
         if self.db.is_none() {
@@ -894,7 +897,7 @@ impl<'db> Tx<'db> {
             return Err(DbError::TxIterating);
         }
 
-        if name == "" {
+        if name.is_empty() {
             // cannot create an index without a name.
             // an empty name index is designated for the main "keys" tree.
             return Err(DbError::IndexExists);
@@ -930,7 +933,7 @@ impl<'db> Tx<'db> {
         };
 
         let mut pattern = pattern;
-        let options = opts.unwrap_or(IndexOptions::default());
+        let options = opts.unwrap_or_default();
         if options.case_insensitive_key_matching {
             pattern = pattern.to_lowercase();
         }
@@ -1011,7 +1014,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+        rect: RectFn,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, vec![], Some(rect), None)
     }
@@ -1022,7 +1025,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        rect: Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>,
+        rect: RectFn,
         opts: IndexOptions,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, vec![], Some(rect), Some(opts))
@@ -1037,7 +1040,7 @@ impl<'db> Tx<'db> {
             return Err(DbError::TxIterating);
         }
 
-        if name == "" {
+        if name.is_empty() {
             // cannot drop the default "keys" index
             return Err(DbError::InvalidOperation);
         }
@@ -1159,6 +1162,7 @@ impl<'db> Tx<'db> {
     // The start and stop params are the greaterThan, lessThan limits. For
     // descending order, these will be lessThan, greaterThan.
     // An error will be returned if the tx is closed or the index is not found.
+    #[allow(clippy::too_many_arguments)]
     fn scan<F>(
         &mut self,
         desc: bool,
