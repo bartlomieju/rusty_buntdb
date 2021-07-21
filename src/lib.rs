@@ -1040,8 +1040,11 @@ impl<'db> Tx<'db> {
             return Err(DbError::IndexExists);
         }
 
+        let db = self.db.as_mut().unwrap();
+        let wc = self.wc.as_mut().unwrap();
+
         // check if an index with that name already exists
-        if self.db.as_ref().unwrap().idxs.contains_key(&name) {
+        if db.idxs.contains_key(&name) {
             // index with name already exists. error.
             return Err(DbError::IndexExists);
         }
@@ -1075,7 +1078,6 @@ impl<'db> Tx<'db> {
             pattern = pattern.to_lowercase();
         }
 
-        // TODO: IMO this should be delegated to Db
         let mut idx = Index {
             btr: None,
             name,
@@ -1084,11 +1086,18 @@ impl<'db> Tx<'db> {
             rect,
             opts: options,
         };
-        idx.rebuild(self.db.as_ref().unwrap());
-        // save the index
-        self.db.as_mut().unwrap().idxs.insert(idx.name.clone(), idx);
+        idx.rebuild(db);
         // store the index in the rollback map.
-        // TODO
+        if wc.rbkeys.is_none() {
+            // store the index in the rollback map
+            if !wc.rollback_indexes.contains_key(&idx.name) {
+                // we use None to indicate that the index should be removed upon
+                // rollback.
+                wc.rollback_indexes.insert(idx.name.clone(), None);
+            }
+        }
+        // save the index
+        db.idxs.insert(idx.name.clone(), idx);
 
         Ok(())
     }
