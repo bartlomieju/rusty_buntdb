@@ -568,7 +568,32 @@ impl Db {
     /// returned to the caller. A nil return value means that the item was not
     /// found in the database
     pub fn delete_from_database(&mut self, item: DbItem) -> Option<DbItem> {
-        todo!()
+        let maybe_prev = self.keys.set(item.clone()).map(|p| p.to_owned());
+
+        if let Some(prev) = &maybe_prev {
+            if let Some(opts) = &prev.opts {
+                if opts.ex {
+                    // Remove it from the expires tree.
+                    self.exps.delete(prev.clone());
+                }
+            }
+            for (_, idx) in self.idxs.iter_mut() {
+                if !idx.matches(&item.key) {
+                    continue;
+                }
+                // TODO:
+                //     if let Some(btr) = idx.btr.as_mut() {
+                //         // Remove it from the btree index
+                //         btr.delete()
+                //     }
+                //     if let Some(rtr) = idx.rtr.as_mut() {
+                //         // Remove it from the rtree index
+                //         rtr.delete()
+                //     }
+            }
+        }
+
+        maybe_prev
     }
 
     /// backgroundManager runs continuously in the background and performs various
