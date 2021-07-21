@@ -1748,8 +1748,13 @@ impl<'db> Tx<'db> {
     }
 
     // Len returns the number of items in the database
-    fn len(&self) -> Result<i64, DbError> {
-        todo!()
+    fn len(&self) -> Result<u64, DbError> {
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        }
+
+        let db = self.db.as_ref().unwrap();
+        Ok(db.keys.count())
     }
 }
 
