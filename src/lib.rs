@@ -883,7 +883,7 @@ pub struct TxWriteContext {
     /// details for rolling back tx.
     rollback_items: HashMap<String, Option<DbItem>>,
     // details for committing tx.
-    commit_items: HashMap<String, DbItem>,
+    commit_items: HashMap<String, Option<DbItem>>,
     // stack of iterators
     itercount: i64,
     // details for dropped indexes.
@@ -1128,7 +1128,7 @@ impl<'db> Tx<'db> {
     }
 
     // unlock unlocks the database based on the transaction type.
-    fn unwrap(&self) {
+    fn unlock(&self) {
         todo!()
         // if self.writable {
         //     self.db.mu.unlock();
@@ -1178,7 +1178,52 @@ impl<'db> Tx<'db> {
     // An error is returned when a write error occurs, or when a Commit() is called
     // from a read-only transaction.
     fn commit(&mut self) -> Result<(), DbError> {
-        todo!()
+        if self.funcd {
+            panic!("managed tx rollback not allowed");
+        }
+
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        } else if !self.writable {
+            return Err(DbError::TxNotWritable);
+        }
+
+        let mut result = Ok(());
+        let mut db = self.db.as_mut().unwrap();
+        let mut wc = self.wc.as_mut().unwrap();
+        if db.persist && (!wc.commit_items.is_empty() || wc.rbkeys.is_some()) {
+            db.buf.clear();
+            // write a flushdb if a deleteAll was called
+            if wc.rbkeys.is_some() {
+                db.buf.extend("*1\r\n$7\r\nflushdb\r\n".as_bytes());
+            }
+            // Each commited record is written to disk
+            for (key, maybe_item) in wc.commit_items.drain() {
+                if let Some(item) = maybe_item {
+                    item.write_set_to(&mut db.buf);
+                } else {
+                    let item = DbItem {
+                        key,
+                        ..Default::default()
+                    };
+                    item.write_delete_to(&mut db.buf);
+                }
+            }
+            // Flushing the buffer only once per transaction.
+            // If this operation fails then the write did failed and we must
+            // rollback.
+            let mut n = 0;
+
+            todo!();
+
+            // Increment the number of flushes. The background syncing uses this.
+            db.flushes += 1;
+        }
+        // Unlock the database and allow for another writable transaction.
+        self.unlock();
+        // Clear the db field to disable this transaction from future use.
+        self.db = None;
+        result
     }
 
     // Rollback closes the transaction and reverts all mutable operations that
@@ -1197,8 +1242,7 @@ impl<'db> Tx<'db> {
         if self.writable {
             self.rollback_inner();
         }
-        // TODO:
-        // tx.unlock();
+        self.unlock();
         // Clear the db field to disable this transaction from future use.
         self.db = None;
         Ok(())
@@ -1300,7 +1344,7 @@ impl<'db> Tx<'db> {
         // For commits we simply assign the item to the map. We use this map to
         // write the entry to disk.
         if db.persist {
-            wc.commit_items.insert(key, item);
+            wc.commit_items.insert(key, Some(item));
         }
 
         Ok((prev_value, replaced))
