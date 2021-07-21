@@ -189,6 +189,32 @@ pub struct Config {
 // `ExCtx` is a simple b-tree context for ordering by expiration.
 struct ExCtx {}
 
+fn keys_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
+    if a.keyless {
+        return Ordering::Less;
+    } else if b.keyless {
+        return Ordering::Greater;
+    }
+    a.key.cmp(&b.key)
+}
+
+fn exps_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
+    // The expires b-tree formula
+    if b.expires_at() > a.expires_at() {
+        return Ordering::Greater;
+    }
+    if a.expires_at() > b.expires_at() {
+        return Ordering::Less;
+    }
+
+    if a.keyless {
+        return Ordering::Less;
+    } else if b.keyless {
+        return Ordering::Greater;
+    }
+    a.key.cmp(&b.key)
+}
+
 impl Db {
     pub fn open(path: &str) -> Result<Db, io::Error> {
         // initialize default configuration
@@ -202,30 +228,8 @@ impl Db {
             mu: RwLock::new(()),
             file: None,
             buf: Vec::new(),
-            keys: BTreeC::new(Box::new(|a: &DbItem, b: &DbItem| {
-                if a.keyless {
-                    return Ordering::Less;
-                } else if b.keyless {
-                    return Ordering::Greater;
-                }
-                a.key.cmp(&b.key)
-            })),
-            exps: BTreeC::new(Box::new(|a: &DbItem, b: &DbItem| {
-                // The expires b-tree formula
-                if b.expires_at() > a.expires_at() {
-                    return Ordering::Greater;
-                }
-                if a.expires_at() > b.expires_at() {
-                    return Ordering::Less;
-                }
-
-                if a.keyless {
-                    return Ordering::Less;
-                } else if b.keyless {
-                    return Ordering::Greater;
-                }
-                a.key.cmp(&b.key)
-            })),
+            keys: BTreeC::new(Box::new(keys_compare_fn)),
+            exps: BTreeC::new(Box::new(exps_compare_fn)),
             idxs: HashMap::new(),
             ins_idxs: Vec::new(),
             flushes: 0,
@@ -504,7 +508,7 @@ impl Db {
     /// insertIntoDatabase performs inserts an item in to the database and updates
     /// all indexes. If a previous item with the same key already exists, that item
     /// will be replaced with the new one, and return the previous item.
-    pub fn insert_into_database(&mut self, item: DbItem) -> DbItem {
+    pub fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
         todo!();
     }
 
@@ -742,7 +746,7 @@ impl Index {
                 return true;
             }
             if self.less.is_some() {
-                // FIXME: this should probably be an Arc or Rc 
+                // FIXME: this should probably be an Arc or Rc
                 // instead of a copy
                 self.btr.as_mut().unwrap().set(item.to_owned());
             }
@@ -750,7 +754,7 @@ impl Index {
                 // TODO:
                 // self.rtr
             }
-            
+
             true
         });
     }
@@ -868,15 +872,16 @@ pub struct Tx<'db> {
 #[derive(Default)]
 pub struct TxWriteContext {
     // rollback when deleteAll is called
-    // a tree of all item ordered by key
-    // rbkeys *btree.BTree
-    // a tree of items ordered by expiration
-    // rbexps *btree.BTree
 
+    // a tree of all item ordered by key
+    rbkeys: Option<BTreeC<DbItem>>,
+    // a tree of items ordered by expiration
+    rbexps: Option<BTreeC<DbItem>>,
     // the index trees.
-    rbidxs: HashMap<String, Arc<Index>>,
+    rbidxs: Option<HashMap<String, Arc<Index>>>,
+
     /// details for rolling back tx.
-    rollback_items: HashMap<String, DbItem>,
+    rollback_items: HashMap<String, Option<DbItem>>,
     // details for committing tx.
     commit_items: HashMap<String, DbItem>,
     // stack of iterators
@@ -887,8 +892,40 @@ pub struct TxWriteContext {
 
 impl<'db> Tx<'db> {
     // DeleteAll deletes all items from the database.
-    fn delete_all(&mut self) {
-        todo!()
+    fn delete_all(&mut self) -> Result<(), DbError> {
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        } else if !self.writable {
+            return Err(DbError::TxNotWritable);
+        } else if self.wc.as_ref().unwrap().itercount > 0 {
+            return Err(DbError::TxIterating);
+        }
+
+        let db = self.db.as_mut().unwrap();
+        let wc = self.wc.as_mut().unwrap();
+
+        // now reset the live database trees
+        let old_keys = std::mem::replace(&mut db.keys, BTreeC::new(Box::new(keys_compare_fn)));
+        let old_exps = std::mem::replace(&mut db.exps, BTreeC::new(Box::new(exps_compare_fn)));
+        let old_idxs = std::mem::replace(&mut db.idxs, HashMap::new());
+
+        // check to see if we've already deleted everything
+        if wc.rbkeys.is_none() {
+            // we need to backup the live data in case of a rollback
+            wc.rbkeys = Some(old_keys);
+            wc.rbexps = Some(old_exps);
+            wc.rbidxs = Some(old_idxs);
+        }
+
+        // finally re-create the indexes
+        for (name, idx) in wc.rbidxs.as_ref().unwrap().iter() {
+            db.idxs.insert(name.to_string(), Arc::new(idx.clear_copy()));
+        }
+
+        // always clear out the commits
+        wc.commit_items = HashMap::new();
+
+        Ok(())
     }
 
     fn indexes(&self) -> Result<Vec<String>, DbError> {
@@ -1152,8 +1189,79 @@ impl<'db> Tx<'db> {
     //
     // Only a writable transaction can be used with this operation.
     // This operation is not allowed during iterations such as Ascend* & Descend*.
-    fn set(&mut self, key: String, val: String, opts: SetOptions) {
-        todo!()
+    fn set(
+        &mut self,
+        key: String,
+        val: String,
+        set_opts: Option<SetOptions>,
+        // TODO: could probably return Option<String> instead
+    ) -> Result<(Option<String>, bool), DbError> {
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        } else if !self.writable {
+            return Err(DbError::TxNotWritable);
+        } else if self.wc.as_ref().unwrap().itercount > 0 {
+            return Err(DbError::TxIterating);
+        }
+
+        let mut item = DbItem {
+            key: key.to_string(),
+            val,
+            keyless: false,
+            opts: None,
+        };
+
+        if let Some(opts) = set_opts {
+            if opts.expires {
+                // The caller is requesting that this item expires. Convert the
+                // TTL to an absolute time and bind it to the item.
+                item.opts = Some(DbItemOpts {
+                    ex: true,
+                    exat: time::Instant::now() + opts.ttl,
+                });
+            }
+        }
+
+        // Insert the item into the keys tree.
+        let db = self.db.as_mut().unwrap();
+        let wc = self.wc.as_mut().unwrap();
+        let maybe_prev = db.insert_into_database(item.clone());
+
+        let mut prev_value = None;
+        let mut replaced = false;
+
+        // insert into the rollback map if there has not been a deleteAll.
+        if wc.rbkeys.is_none() {
+            if let Some(prev) = maybe_prev {
+                // A previous item already exists in the database. Let's create a
+                // rollback entry with the item as the value. We need to check the
+                // map to see if there isn't already an item that matches the
+                // same key.
+                if !wc.rollback_items.contains_key(&key) {
+                    wc.rollback_items
+                        .insert(key.to_string(), Some(prev.clone()));
+                }
+                if !prev.expired() {
+                    prev_value = Some(prev.val);
+                    replaced = true;
+                }
+            } else {
+                // An item with the same key did not previously exist. Let's
+                // create a rollback entry with a nil value. A nil value indicates
+                // that the entry should be deleted on rollback. When the value is
+                // *not* nil, that means the entry should be reverted.
+                if !wc.rollback_items.contains_key(&key) {
+                    wc.rollback_items.insert(key.to_string(), None);
+                }
+            }
+        }
+        // For commits we simply assign the item to the map. We use this map to
+        // write the entry to disk.
+        if db.persist {
+            wc.commit_items.insert(key, item);
+        }
+
+        Ok((prev_value, replaced))
     }
 
     // Get returns a value for a key. If the item does not exist or if the item
