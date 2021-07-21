@@ -99,10 +99,10 @@ pub struct Db {
     exps: BTreeC<DbItem>,
 
     /// the index trees.
-    idxs: HashMap<String, Arc<Index>>,
+    idxs: HashMap<String, Index>,
 
     /// a reuse buffer for gathering indexes
-    ins_idxs: Vec<Arc<Index>>,
+    ins_idxs: Vec<Index>,
 
     /// a count of the number of disk flushes
     flushes: i64,
@@ -769,7 +769,7 @@ pub struct DbItemOpts {
     exat: time::Instant,
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct DbItem {
     // the binary key
     key: String,
@@ -878,7 +878,7 @@ pub struct TxWriteContext {
     // a tree of items ordered by expiration
     rbexps: Option<BTreeC<DbItem>>,
     // the index trees.
-    rbidxs: Option<HashMap<String, Arc<Index>>>,
+    rbidxs: Option<HashMap<String, Index>>,
 
     /// details for rolling back tx.
     rollback_items: HashMap<String, Option<DbItem>>,
@@ -887,7 +887,7 @@ pub struct TxWriteContext {
     // stack of iterators
     itercount: i64,
     // details for dropped indexes.
-    rollback_indexes: HashMap<String, Arc<Index>>,
+    rollback_indexes: HashMap<String, Option<Index>>,
 }
 
 impl<'db> Tx<'db> {
@@ -919,7 +919,7 @@ impl<'db> Tx<'db> {
 
         // finally re-create the indexes
         for (name, idx) in wc.rbidxs.as_ref().unwrap().iter() {
-            db.idxs.insert(name.to_string(), Arc::new(idx.clear_copy()));
+            db.idxs.insert(name.to_string(), idx.clear_copy());
         }
 
         // always clear out the commits
@@ -1013,11 +1013,7 @@ impl<'db> Tx<'db> {
         };
         idx.rebuild(self.db.as_ref().unwrap());
         // save the index
-        self.db
-            .as_mut()
-            .unwrap()
-            .idxs
-            .insert(idx.name.clone(), Arc::new(idx));
+        self.db.as_mut().unwrap().idxs.insert(idx.name.clone(), idx);
         // store the index in the rollback map.
         // TODO
 
@@ -1144,7 +1140,38 @@ impl<'db> Tx<'db> {
     // rollbackInner handles the underlying rollback logic.
     // Intended to be called from Commit() and Rollback().
     fn rollback_inner(&mut self) {
-        todo!()
+        // rollback the deleteAll if needed
+        let wc = self.wc.as_mut().unwrap();
+        let db = self.db.as_mut().unwrap();
+
+        if wc.rbkeys.is_some() {
+            db.keys = wc.rbkeys.take().unwrap();
+            db.idxs = wc.rbidxs.take().unwrap();
+            db.exps = wc.rbexps.take().unwrap();
+        }
+
+        for (key, maybe_item) in wc.rollback_items.drain() {
+            // TODO: make a helper on DbItem
+            db.delete_from_database(DbItem {
+                key: key.to_string(),
+                ..Default::default()
+            });
+            if let Some(item) = maybe_item {
+                // when an item is not None, we will need to reinsert that item
+                // into the database overwriting the current one.
+                db.insert_into_database(item);
+            }
+        }
+        for (name, maybe_idx) in wc.rollback_indexes.drain() {
+            db.idxs.remove(&name);
+            if let Some(mut idx) = maybe_idx {
+                // When an index is not None, we will need to rebuild that index
+                // this could an expensive process if the database has many
+                // items or the index is complex.
+                idx.rebuild(db);
+                db.idxs.insert(name, idx);
+            }
+        }
     }
 
     // Commit writes all changes to disk.
@@ -1159,7 +1186,22 @@ impl<'db> Tx<'db> {
     //
     // Read-only transactions can only be rolled back, not committed.
     fn rollback(&mut self) -> Result<(), DbError> {
-        todo!()
+        if self.funcd {
+            panic!("managed tx rollback not allowed");
+        }
+
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        }
+        // The rollback func does the heavy lifting.
+        if self.writable {
+            self.rollback_inner();
+        }
+        // TODO:
+        // tx.unlock();
+        // Clear the db field to disable this transaction from future use.
+        self.db = None;
+        Ok(())
     }
 
     // GetLess returns the less function for an index. This is handy for
