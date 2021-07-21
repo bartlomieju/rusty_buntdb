@@ -290,7 +290,7 @@ impl Db {
         let mut buf = Vec::with_capacity(4 * 1024 * 1024);
         // iterate through every item in the database and write to the buffer
         self.keys.ascend(None, |item| {
-            // TODO: write to buffer
+            item.write_set_to(&mut buf);
 
             if buf.len() > 4 * 1024 * 1024 {
                 // flush when buffer is over 4MB
@@ -621,12 +621,6 @@ impl Db {
     }
 }
 
-fn less_ctx<T>() -> Box<dyn Fn(T, T) -> bool> {
-    Box::new(move |a: T, b: T| -> bool {
-        // a.less(b)
-        false
-    })
-}
 /// `IndexOptions` provides an index with additional features or
 /// alternate functionality.
 #[derive(Clone, Default)]
@@ -758,50 +752,6 @@ impl Index {
     }
 }
 
-fn exctx_less(a: &DbItem, b: &DbItem) -> Option<bool> {
-    // The expires b-tree formula
-    if b.expires_at() > a.expires_at() {
-        return Some(true);
-    }
-    if a.expires_at() > b.expires_at() {
-        return Some(false);
-    }
-    None
-}
-
-fn index_less(
-    less: Box<dyn Fn(String, String) -> bool>,
-) -> Box<dyn Fn(&DbItem, &DbItem) -> Option<bool>> {
-    Box::new(move |a, b| {
-        // TODO: remove these clones
-        if less(a.val.clone(), b.val.clone()) {
-            return Some(true);
-        }
-        if less(b.val.clone(), a.val.clone()) {
-            return Some(false);
-        }
-
-        None
-    })
-}
-
-fn make_db_item_less(
-    func: Box<dyn Fn(&DbItem, &DbItem) -> Option<bool>>,
-) -> Box<dyn Fn(DbItem, DbItem) -> bool> {
-    Box::new(move |a, b| {
-        if let Some(value) = func(&a, &b) {
-            return value;
-        }
-
-        if a.keyless {
-            return false;
-        } else if b.keyless {
-            return true;
-        }
-        a.key < b.key
-    })
-}
-
 /// DbItemOpts holds various meta information about an item.
 #[derive(Eq, PartialEq)]
 pub struct DbItemOpts {
@@ -855,6 +805,41 @@ impl DbItem {
 
         get_max_time()
     }
+
+    // writeSetTo writes an item as a single SET record to the a bufio Writer.
+    fn write_set_to(&self, buf: &mut Vec<u8>) {
+        if let Some(opts) = &self.opts {
+            if opts.ex {
+                let ex = (opts.exat - time::Instant::now()).as_secs();
+                append_array(buf, 5);
+                append_bulk_string(buf, "set");
+                append_bulk_string(buf, &self.key);
+                append_bulk_string(buf, &self.val);
+                append_bulk_string(buf, "ex");
+                append_bulk_string(buf, &format!("{}", ex));
+            }
+        }
+
+        append_array(buf, 3);
+        append_bulk_string(buf, "set");
+        append_bulk_string(buf, &self.key);
+        append_bulk_string(buf, &self.val);
+    }
+
+    // writeDeleteTo deletes an item as a single DEL record to the a bufio Writer.
+    fn write_delete_to(&self, buf: &mut Vec<u8>) {
+        append_array(buf, 2);
+        append_bulk_string(buf, "del");
+        append_bulk_string(buf, &self.key);
+    }
+}
+
+fn append_array(buf: &mut Vec<u8>, count: i64) {
+    buf.extend(format!("*{}\r\n", count).as_bytes());
+}
+
+fn append_bulk_string(buf: &mut Vec<u8>, s: &str) {
+    buf.extend(format!("${}\r\n{}\r\n", s.len(), s).as_bytes());
 }
 
 // Tx represents a transaction on the database. This transaction can either be
