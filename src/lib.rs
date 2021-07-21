@@ -518,7 +518,7 @@ impl Db {
     /// with the matching key was found in the database, it will be removed and
     /// returned to the caller. A nil return value means that the item was not
     /// found in the database
-    pub fn delete_from_database(&mut self, item: DbItem) -> DbItem {
+    pub fn delete_from_database(&mut self, item: DbItem) -> Option<DbItem> {
         todo!()
     }
 
@@ -1105,15 +1105,24 @@ impl<'db> Tx<'db> {
             return Err(DbError::InvalidOperation);
         }
 
-        let maybe_idx = self.db.as_mut().unwrap().idxs.remove(&name);
-        if maybe_idx.is_none() {
+        let wc = self.wc.as_mut().unwrap();
+        let db = self.db.as_mut().unwrap();
+        if !db.idxs.contains_key(&name) {
             return Err(DbError::NotFound);
         }
-        let idx = maybe_idx.unwrap();
-        // TODO:
-        // if self.wc.unwrap().rbkeys {
 
-        // }
+        // delete from the map.
+        // this is all that is needed to delete an index.
+        let idx = db.idxs.remove(&name).unwrap();
+        if wc.rbkeys.is_none() {
+            // store the index in the rollback map.
+            if !wc.rollback_indexes.contains_key(&name) {
+                // we use a non-nil copy of the index without the data to indicate
+                // that the index should be rebuilt upon rollback.
+                wc.rollback_indexes.insert(name, Some(idx.clear_copy()));
+            }
+        }
+
         Ok(())
     }
 
@@ -1353,8 +1362,23 @@ impl<'db> Tx<'db> {
     // Get returns a value for a key. If the item does not exist or if the item
     // has expired then ErrNotFound is returned. If ignoreExpired is true, then
     // the found value will be returned even if it is expired.
-    fn get(&mut self, key: String, ignore_expired: bool) {
-        todo!()
+    fn get(&mut self, key: String, ignore_expired: bool) -> Result<String, DbError> {
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        }
+        let maybe_item = self.db.as_ref().unwrap().get(key);
+
+        match maybe_item {
+            None => Err(DbError::NotFound),
+            Some(item) => {
+                if item.expired() && !ignore_expired {
+                    // The item does not exists or has expired. Let's assume that
+                    // the caller is only interested in items that have not expired.
+                    return Err(DbError::NotFound);
+                }
+                Ok(item.val)
+            }
+        }
     }
 
     // Delete removes an item from the database based on the item's key. If the item
@@ -1363,7 +1387,42 @@ impl<'db> Tx<'db> {
     // Only a writable transaction can be used for this operation.
     // This operation is not allowed during iterations such as Ascend* & Descend*.
     fn delete(&mut self, key: String) -> Result<String, DbError> {
-        todo!()
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        } else if !self.writable {
+            return Err(DbError::TxNotWritable);
+        } else if self.wc.as_ref().unwrap().itercount > 0 {
+            return Err(DbError::TxIterating);
+        }
+
+        let wc = self.wc.as_mut().unwrap();
+        let db = self.db.as_mut().unwrap();
+        let maybe_item = db.delete_from_database(DbItem {
+            key: key.to_string(),
+            ..Default::default()
+        });
+        if maybe_item.is_none() {
+            return Err(DbError::NotFound);
+        }
+        let item = maybe_item.unwrap();
+        // create a rollback entry if there has not been a deleteAll call
+        if wc.rbkeys.is_none() {
+            if !wc.rollback_items.contains_key(&key) {
+                wc.rollback_items
+                    .insert(key.to_string(), Some(item.clone()));
+            }
+        }
+        if db.persist {
+            wc.commit_items.insert(key, None);
+        }
+        // Even though the item has been deleted. we still want to check
+        // if it has expired. An expired item should not be returned.
+        if item.expired() {
+            // The item exists in the tree, but has expired. Let's assume that
+            // the caller is only interested in items that have not expired.
+            return Err(DbError::NotFound);
+        }
+        Ok(item.val)
     }
 
     // TTL returns the remaining time-to-live for an item.
