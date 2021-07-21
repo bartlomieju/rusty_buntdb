@@ -526,17 +526,16 @@ impl Db {
                     self.exps.delete(prev.clone());
                 }
             }
-            // TODO:
-            // for (_, idx) in idxs {
-            //     if let Some(btr) = idx.btr.as_mut() {
-            //         // Remove it from the btree index
-            //         btr.delete()
-            //     }
-            //     if let Some(rtr) = idx.rtr.as_mut() {
-            //         // Remove it from the rtree index
-            //         rtr.delete()
-            //     }
-            // }
+            for idx in ins_idxs.iter_mut() {
+                if let Some(btr) = idx.btr.as_mut() {
+                    // Remove it from the btree index
+                    btr.delete(item.clone());
+                }
+                //     if let Some(rtr) = idx.rtr.as_mut() {
+                //         // Remove it from the rtree index
+                //         rtr.delete()
+                //     }
+            }
         }
         if let Some(opts) = &item.opts {
             if opts.ex {
@@ -546,11 +545,11 @@ impl Db {
             }
         }
         for idx in ins_idxs.drain(..) {
+            if let Some(btr) = idx.btr.as_mut() {
+                // Remove it from the btree index
+                btr.set(item.clone());
+            }
             // TODO:
-            // if let Some(btr) = idx.btr.as_mut() {
-            //     // Remove it from the btree index
-            //     btr.set(item.clone())
-            // }
             // if let Some(rtr) = idx.rtr.as_mut() {
             //     // Remove it from the rtree index
             //     rtr.set(item.clone())
@@ -581,11 +580,11 @@ impl Db {
                 if !idx.matches(&item.key) {
                     continue;
                 }
+                if let Some(btr) = idx.btr.as_mut() {
+                    // Remove it from the btree index
+                    btr.delete(prev.clone());
+                }
                 // TODO:
-                //     if let Some(btr) = idx.btr.as_mut() {
-                //         // Remove it from the btree index
-                //         btr.delete()
-                //     }
                 //     if let Some(rtr) = idx.rtr.as_mut() {
                 //         // Remove it from the rtree index
                 //         rtr.delete()
