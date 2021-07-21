@@ -249,12 +249,13 @@ impl Db {
                 .open(path)?;
             db.file = Some(file);
 
+            // TODO:
             // load the database from disk
-            if let Err(err) = db.load_from_disk() {
-                // close on error, ignore close error
-                db.file.take();
-                return Err(err);
-            }
+            // if let Err(err) = db.load_from_disk() {
+            //     // close on error, ignore close error
+            //     db.file.take();
+            //     return Err(err);
+            // }
         }
 
         // TODO:
@@ -898,6 +899,7 @@ impl DbItem {
                 append_bulk_string(buf, &self.val);
                 append_bulk_string(buf, "ex");
                 append_bulk_string(buf, &format!("{}", ex));
+                return;
             }
         }
 
@@ -1210,7 +1212,7 @@ impl<'db> Tx<'db> {
 
     // lock locks the database based on the transaction type.
     fn lock(&self) {
-        todo!()
+        // todo!()
         // if self.writable {
         //     self.db.mu.write().unwrap();
         // } else {
@@ -1220,7 +1222,7 @@ impl<'db> Tx<'db> {
 
     // unlock unlocks the database based on the transaction type.
     fn unlock(&self) {
-        todo!()
+        // todo!()
         // if self.writable {
         //     self.db.mu.unlock();
         // } else {
@@ -1305,7 +1307,7 @@ impl<'db> Tx<'db> {
             // rollback.
             let mut n = 0;
 
-            todo!();
+            // todo!();
 
             // Increment the number of flushes. The background syncing uses this.
             db.flushes += 1;
@@ -1530,15 +1532,98 @@ impl<'db> Tx<'db> {
         desc: bool,
         gt: bool,
         lt: bool,
-        index: String,
-        start: String,
-        stop: String,
-        iterator: F,
+        index: &str,
+        start: &str,
+        stop: &str,
+        mut iterator: F,
     ) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        }
+
+        let db = self.db.as_ref().unwrap();
+        let mut tr;
+
+        if index == "" {
+            // empty index means we will use the keys tree
+            tr = &db.keys;
+        } else {
+            if let Some(idx) = db.idxs.get(index) {
+                if let Some(btr) = &idx.btr {
+                    tr = btr;
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Err(DbError::NotFound);
+            }
+        }
+
+        // create some limit items
+        let mut item_a;
+        let mut item_b;
+
+        if gt || lt {
+            if index == "" {
+                item_a = DbItem {
+                    key: start.to_string(),
+                    ..Default::default()
+                };
+                item_b = DbItem {
+                    key: stop.to_string(),
+                    ..Default::default()
+                };
+            } else {
+                item_a = DbItem {
+                    val: start.to_string(),
+                    ..Default::default()
+                };
+                item_b = DbItem {
+                    val: stop.to_string(),
+                    ..Default::default()
+                };
+                if desc {
+                    item_a.keyless = true;
+                    item_b.keyless = true;
+                }
+            }
+        }
+
+        // execute the scan on the underlying tree.
+        if let Some(wc) = self.wc.as_mut() {
+            wc.itercount += 1;
+        }
+
+        if desc {
+            if gt {
+                todo!()
+            } else if lt {
+                todo!()
+            } else {
+                tr.descend(None, |item| iterator(&item.key, &item.val));
+            }
+        } else {
+            if gt {
+                if lt {
+                    todo!()
+                } else {
+                    todo!()
+                }
+            } else if lt {
+                todo!()
+            } else {
+                tr.ascend(None, |item| iterator(&item.key, &item.val));
+            }
+        }
+
+        if let Some(wc) = self.wc.as_mut() {
+            wc.itercount -= 1;
+        }
+
+        Ok(())
     }
 
     // AscendKeys allows for iterating through keys based on the specified pattern.
@@ -1565,9 +1650,9 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(false, false, false, &index, "", "", iterator)
     }
 
     // AscendGreaterOrEqual calls the iterator for every item in the database within
@@ -1778,12 +1863,23 @@ struct Rect {
 //     tr.ascend(None, iter);
 // }
 
+// index_int is a helper function that returns true if 'a` is less than 'b'
+fn index_int(a: String, b: String) -> bool {
+    let ia = a.parse::<i32>().unwrap();
+    let ib = b.parse::<i32>().unwrap();
+    ia < ib
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    macro_rules! svec {
+        ($($x:expr),*) => (vec![$($x.to_string()),*]);
+    }
+
     fn test_open() -> Db {
-        std::fs::remove_file("data.db").unwrap();
+        std::fs::remove_file("data.db");
         test_reopen(None)
     }
 
@@ -1807,5 +1903,48 @@ mod tests {
     #[test]
     fn save_load() {
         let db = Db::open(":memory:").unwrap();
+    }
+
+    #[test]
+    fn test_index_transaction() {
+        let mut db = test_open();
+
+        fn ascend(tx: &mut Tx, index: &str) -> Vec<String> {
+            let mut vals = vec![];
+
+            tx.ascend(index.to_string(), |key, val| {
+                vals.push(key.to_string());
+                vals.push(val.to_string());
+                true
+            })
+            .unwrap();
+
+            vals
+        }
+
+        fn ascend_equal(tx: &mut Tx, index: &str, vals: Vec<String>) {
+            let vals2 = ascend(tx, index);
+            assert_eq!(vals.len(), vals2.len(), "invalid size match");
+            for i in 0..vals.len() {
+                assert_eq!(vals[i], vals2[i], "invalid order");
+            }
+        }
+
+        // test creating an index and adding items
+        db.update(|tx| {
+            tx.set("1".to_string(), "3".to_string(), None);
+            tx.set("2".to_string(), "2".to_string(), None);
+            tx.set("1".to_string(), "1".to_string(), None);
+            tx.create_index(
+                "idx1".to_string(),
+                "*".to_string(),
+                vec![Arc::new(index_int)],
+            )?;
+            ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
+            Ok(())
+        })
+        .unwrap();
+
+        test_close(db);
     }
 }
