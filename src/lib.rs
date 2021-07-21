@@ -695,7 +695,7 @@ impl Index {
         if nidx.less.is_some() {
             // TODO:
             let less_fn = nidx.less.clone().unwrap();
-            nidx.btr = Some(BTreeC::new(Box::new(move |a: &DbItem, b: &DbItem| {
+            let compare_fn = Box::new(move |a: &DbItem, b: &DbItem| {
                 // TODO: remove these clones
                 if less_fn(a.val.clone(), b.val.clone()) {
                     return Ordering::Greater;
@@ -710,7 +710,9 @@ impl Index {
                     return Ordering::Greater;
                 }
                 a.key.cmp(&b.key)
-            })));
+            });
+            let btree = BTreeC::new(compare_fn);
+            nidx.btr = Some(btree);
         }
         if nidx.rect.is_some() {
             // TODO:
@@ -721,7 +723,7 @@ impl Index {
     }
 
     // `rebuild` rebuilds the index
-    pub fn rebuild(&mut self) {
+    pub fn rebuild(&mut self, db: &Db) {
         // initialize trees
         if self.less.is_some() {
             // TODO: less_ctx(self)
@@ -734,26 +736,28 @@ impl Index {
             // self.rtr =
         }
         // iterate through all keys and fill the index
-        // TODO: need to add `db` field
-        // btree_ascend(&self.db.keys, &|item| {
-        //     if !self.matches(&item.key) {
-        //         // does not match the pattern continue
-        //         return true
-        //     }
-        //     if self.less.is_some() {
-        //         self.btr.as_mut().unwrap().set(item);
-        //     }
-        //     if self.rect.is_some() {
-        //         // TODO:
-        //         // self.rtr
-        //     }
-        //     return true;
-        // })
+        db.keys.ascend(None, |item| {
+            if !self.matches(&item.key) {
+                // does not match the pattern continue
+                return true;
+            }
+            if self.less.is_some() {
+                // FIXME: this should probably be an Arc or Rc 
+                // instead of a copy
+                self.btr.as_mut().unwrap().set(item.to_owned());
+            }
+            if self.rect.is_some() {
+                // TODO:
+                // self.rtr
+            }
+            
+            true
+        });
     }
 }
 
 /// DbItemOpts holds various meta information about an item.
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DbItemOpts {
     /// does this item expire?
     ex: bool,
@@ -761,7 +765,7 @@ pub struct DbItemOpts {
     exat: time::Instant,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DbItem {
     // the binary key
     key: String,
@@ -961,16 +965,16 @@ impl<'db> Tx<'db> {
             pattern = pattern.to_lowercase();
         }
 
+        // TODO: IMO this should be delegated to Db
         let mut idx = Index {
             btr: None,
-            // db: self.db.clone().unwrap(),
             name,
             pattern,
             less,
             rect,
             opts: options,
         };
-        idx.rebuild();
+        idx.rebuild(self.db.as_ref().unwrap());
         // save the index
         self.db
             .as_mut()
