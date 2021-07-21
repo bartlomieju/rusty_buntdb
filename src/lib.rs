@@ -5,7 +5,9 @@
 
 #![allow(unused)]
 
+use btreec::BTreeC;
 use once_cell::sync::OnceCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -15,9 +17,6 @@ use std::io;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time;
-
-mod btree;
-use btree::BTree;
 
 type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
 
@@ -94,10 +93,10 @@ pub struct Db {
     buf: Vec<u8>,
 
     /// a tree of all item ordered by key
-    keys: BTree<DbItem>,
+    keys: BTreeC<DbItem>,
 
     /// a tree of items ordered by expiration
-    exps: BTree<DbItem>,
+    exps: BTreeC<DbItem>,
 
     /// the index trees.
     idxs: HashMap<String, Arc<Index>>,
@@ -203,8 +202,30 @@ impl Db {
             mu: RwLock::new(()),
             file: None,
             buf: Vec::new(),
-            keys: BTree::new(make_db_item_less(Arc::new(|_, _| None))),
-            exps: BTree::new(make_db_item_less(Arc::new(exctx_less))),
+            keys: BTreeC::new(Box::new(|a: &DbItem, b: &DbItem| {
+                if a.keyless {
+                    return Ordering::Less;
+                } else if b.keyless {
+                    return Ordering::Greater;
+                }
+                a.key.cmp(&b.key)
+            })),
+            exps: BTreeC::new(Box::new(|a: &DbItem, b: &DbItem| {
+                // The expires b-tree formula
+                if b.expires_at() > a.expires_at() {
+                    return Ordering::Greater;
+                }
+                if a.expires_at() > b.expires_at() {
+                    return Ordering::Less;
+                }
+
+                if a.keyless {
+                    return Ordering::Less;
+                } else if b.keyless {
+                    return Ordering::Greater;
+                }
+                a.key.cmp(&b.key)
+            })),
             idxs: HashMap::new(),
             ins_idxs: Vec::new(),
             flushes: 0,
@@ -268,7 +289,7 @@ impl Db {
         // use a buffered writer and flush every 4MB
         let mut buf = Vec::with_capacity(4 * 1024 * 1024);
         // iterate through every item in the database and write to the buffer
-        btree_ascend(&self.keys, &|item| {
+        self.keys.ascend(None, |item| {
             // TODO: write to buffer
 
             if buf.len() > 4 * 1024 * 1024 {
@@ -600,8 +621,8 @@ impl Db {
     }
 }
 
-fn less_ctx<T>() -> Arc<dyn Fn(T, T) -> bool> {
-    Arc::new(move |a: T, b: T| -> bool {
+fn less_ctx<T>() -> Box<dyn Fn(T, T) -> bool> {
+    Box::new(move |a: T, b: T| -> bool {
         // a.less(b)
         false
     })
@@ -619,7 +640,7 @@ struct IndexOptions {
 /// b-tree/r-tree context for itself.
 struct Index {
     // contains the items
-    btr: Option<BTree<DbItem>>,
+    btr: Option<BTreeC<DbItem>>,
 
     /// contains the items
     // rtr     *rtred.RTree
@@ -679,8 +700,23 @@ impl Index {
         // initialize with empty trees
         if nidx.less.is_some() {
             // TODO:
-            let index_less_fn = index_less(nidx.less.clone().unwrap());
-            nidx.btr = Some(BTree::new(make_db_item_less(index_less_fn)));
+            let less_fn = nidx.less.clone().unwrap();
+            nidx.btr = Some(BTreeC::new(Box::new(move |a: &DbItem, b: &DbItem| {
+                // TODO: remove these clones
+                if less_fn(a.val.clone(), b.val.clone()) {
+                    return Ordering::Greater;
+                }
+                if less_fn(b.val.clone(), a.val.clone()) {
+                    return Ordering::Less;
+                }
+
+                if a.keyless {
+                    return Ordering::Less;
+                } else if b.keyless {
+                    return Ordering::Greater;
+                }
+                a.key.cmp(&b.key)
+            })));
         }
         if nidx.rect.is_some() {
             // TODO:
@@ -695,7 +731,9 @@ impl Index {
         // initialize trees
         if self.less.is_some() {
             // TODO: less_ctx(self)
-            self.btr = Some(BTree::new(less_ctx()));
+            self.btr = Some(BTreeC::new(Box::new(|a: &DbItem, b: &DbItem| {
+                Ordering::Equal
+            })));
         }
         if self.rect.is_some() {
             // TODO:
@@ -732,9 +770,9 @@ fn exctx_less(a: &DbItem, b: &DbItem) -> Option<bool> {
 }
 
 fn index_less(
-    less: Arc<dyn Fn(String, String) -> bool>,
-) -> Arc<dyn Fn(&DbItem, &DbItem) -> Option<bool>> {
-    Arc::new(move |a, b| {
+    less: Box<dyn Fn(String, String) -> bool>,
+) -> Box<dyn Fn(&DbItem, &DbItem) -> Option<bool>> {
+    Box::new(move |a, b| {
         // TODO: remove these clones
         if less(a.val.clone(), b.val.clone()) {
             return Some(true);
@@ -748,9 +786,9 @@ fn index_less(
 }
 
 fn make_db_item_less(
-    func: Arc<dyn Fn(&DbItem, &DbItem) -> Option<bool>>,
-) -> Arc<dyn Fn(DbItem, DbItem) -> bool> {
-    Arc::new(move |a, b| {
+    func: Box<dyn Fn(&DbItem, &DbItem) -> Option<bool>>,
+) -> Box<dyn Fn(DbItem, DbItem) -> bool> {
+    Box::new(move |a, b| {
         if let Some(value) = func(&a, &b) {
             return value;
         }
@@ -1407,9 +1445,9 @@ struct Rect {
     max: Vec<f64>,
 }
 
-fn btree_ascend<T>(tr: &BTree<T>, iter: &dyn FnMut(T) -> bool) {
-    tr.ascend(None, iter)
-}
+// fn btree_ascend<T>(tr: &BTreeC<T>, iter: &dyn FnMut(&T) -> bool) {
+//     tr.ascend(None, iter);
+// }
 
 #[cfg(test)]
 mod tests {
