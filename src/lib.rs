@@ -509,7 +509,56 @@ impl Db {
     /// all indexes. If a previous item with the same key already exists, that item
     /// will be replaced with the new one, and return the previous item.
     pub fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
-        todo!();
+        // Generate a list of indexes that this item will be inserted into
+        let mut ins_idxs = vec![];
+        for (_, idx) in self.idxs.iter_mut() {
+            if idx.matches(&item.key) {
+                ins_idxs.push(idx);
+            }
+        }
+
+        let maybe_prev = self.keys.set(item.clone()).map(|p| p.to_owned());
+        if let Some(prev) = &maybe_prev {
+            // A previous item was removed from the keys tree. Let's
+            // full delete this item from all indexes.
+            if let Some(opts) = &prev.opts {
+                if opts.ex {
+                    self.exps.delete(prev.clone());
+                }
+            }
+            // TODO:
+            // for (_, idx) in idxs {
+            //     if let Some(btr) = idx.btr.as_mut() {
+            //         // Remove it from the btree index
+            //         btr.delete()
+            //     }
+            //     if let Some(rtr) = idx.rtr.as_mut() {
+            //         // Remove it from the rtree index
+            //         rtr.delete()
+            //     }
+            // }
+        }
+        if let Some(opts) = &item.opts {
+            if opts.ex {
+                // The new item has eviction options. Add it to the
+                // expires tree.
+                self.exps.set(item.clone());
+            }
+        }
+        for idx in ins_idxs.drain(..) {
+            // TODO:
+            // if let Some(btr) = idx.btr.as_mut() {
+            //     // Remove it from the btree index
+            //     btr.set(item.clone())
+            // }
+            // if let Some(rtr) = idx.rtr.as_mut() {
+            //     // Remove it from the rtree index
+            //     rtr.set(item.clone())
+            // }
+        }
+
+        // we must return previous item to the caller
+        maybe_prev
     }
 
     /// deleteFromDatabase removes and item from the database and indexes. The input
