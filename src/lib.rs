@@ -1661,7 +1661,7 @@ impl<'db> Tx<'db> {
             if gt {
                 todo!()
             } else if lt {
-                todo!()
+                tr.descend(item_a, |item| iterator(&item.key, &item.val));
             } else {
                 tr.descend(None, |item| {
                     let val = iterator(&item.key, &item.val);
@@ -2333,6 +2333,54 @@ mod tests {
 
         db.view(|tx| {
             tx.ascend_equal("num", "1125", |k, _| {
+                res_mut.push(k.to_string());
+                true
+            })
+        })
+        .unwrap();
+
+        assert_eq!(res.len(), 2);
+        assert_eq!(res, svec!["key:00125A", "key:00125B"]);
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_descend_equal() {
+        let mut db = test_open();
+
+        db.update(|tx| {
+            for i in 0..300 {
+                tx.set(format!("key:{:05}A", i), format!("{}", i + 1000), None)
+                    .unwrap();
+                tx.set(format!("key:{:05}B", i), format!("{}", i + 1000), None)
+                    .unwrap();
+            }
+            tx.create_index(
+                "num".to_string(),
+                "*".to_string(),
+                vec![Arc::new(index_int)],
+            )
+        }).unwrap();
+
+        let mut res = vec![];
+        let res_mut = &mut res;
+        db.view(|tx| {
+            tx.descend_equal("", "key:00055A", |k, _| {
+                res_mut.push(k.to_string());
+                true
+            })
+        })
+        .unwrap();
+
+        assert_eq!(res.len(), 1);
+        assert_eq!(res, svec!["key:00055A"]);
+
+        res = vec![];
+        let res_mut = &mut res;
+
+        db.view(|tx| {
+            tx.descend_equal("num", "1125", |k, _| {
                 res_mut.push(k.to_string());
                 true
             })
