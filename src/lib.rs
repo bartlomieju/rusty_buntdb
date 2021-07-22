@@ -1625,32 +1625,30 @@ impl<'db> Tx<'db> {
         }
 
         // create some limit items
-        let mut item_a;
-        let mut item_b;
+        let mut item_a = None;
+        let mut item_b = None;
 
         if gt || lt {
             if index == "" {
-                item_a = DbItem {
+                item_a = Some(DbItem {
                     key: start.to_string(),
                     ..Default::default()
-                };
-                item_b = DbItem {
+                });
+                item_b = Some(DbItem {
                     key: stop.to_string(),
                     ..Default::default()
-                };
+                });
             } else {
-                item_a = DbItem {
+                item_a = Some(DbItem {
                     val: start.to_string(),
+                    keyless: desc,
                     ..Default::default()
-                };
-                item_b = DbItem {
+                });
+                item_b = Some(DbItem {
                     val: stop.to_string(),
+                    keyless: desc,
                     ..Default::default()
-                };
-                if desc {
-                    item_a.keyless = true;
-                    item_b.keyless = true;
-                }
+                });
             }
         }
 
@@ -1674,11 +1672,11 @@ impl<'db> Tx<'db> {
         } else {
             if gt {
                 if lt {
-                    // tr.ascend(maybe_pivot, |item| {
-                    //     bLT(tr, item, ) && iterator(&item.key, &item.val);
+                    // tr.ascend(item_a.clone(), |item| {
+                    //     btree_lt(tr, item_a.as_ref().unwrap(), item) && iterator(&item.key, &item.val)
                     // });
                 } else {
-                    todo!()
+                    tr.ascend(item_a, |item| iterator(&item.key, &item.val));
                 }
             } else if lt {
                 todo!()
@@ -1974,9 +1972,13 @@ struct Rect {
     max: Vec<f64>,
 }
 
-// fn btree_ascend<T>(tr: &BTreeC<T>, iter: &dyn FnMut(&T) -> bool) {
-//     tr.ascend(None, iter);
-// }
+fn btree_lt(tree: &BTreeC<DbItem>, a: &DbItem, b: &DbItem) -> bool {
+    tree.less(a, b)
+}
+
+fn btree_gt(tree: &BTreeC<DbItem>, a: &DbItem, b: &DbItem) -> bool {
+    tree.less(b, a)
+}
 
 // index_int is a helper function that returns true if 'a` is less than 'b'
 fn index_int(a: String, b: String) -> bool {
