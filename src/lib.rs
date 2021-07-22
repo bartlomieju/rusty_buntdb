@@ -14,6 +14,7 @@ use std::fmt;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time;
@@ -129,7 +130,7 @@ pub struct Db {
 }
 
 /// SyncPolicy represents how often data is synced to disk.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum SyncPolicy {
     /// Never is used to disable syncing data to disk.
     /// The faster and less safe method.
@@ -254,8 +255,8 @@ impl Db {
                 .open(path)?;
             db.file = Some(file);
 
-            // TODO:
             // load the database from disk
+            // TODO:
             // if let Err(err) = db.load_from_disk() {
             //     // close on error, ignore close error
             //     db.file.take();
@@ -332,10 +333,21 @@ impl Db {
     /// Returns the number of bytes of the last command read and the error if any.
     pub fn read_load(
         &self,
-        _reader: &dyn io::Read,
-        _mod_time: time::SystemTime,
+        reader: &dyn io::Read,
+        mod_time: time::SystemTime,
     ) -> (u64, Option<io::Error>) {
-        todo!();
+        // let mut total_size = 0;
+        // let mut data = Vec::with_capacity(4096);
+        // let mut parts = vec![];
+
+        // loop {
+        // peek at the first byte. If it's a 'nul' control character then
+        // ignore it and move to the next byte.
+
+        // }
+
+        // (0, None)
+        todo!()
     }
 
     /// `load_from_disk` reads entries from the append only database file and fills the database.
@@ -1333,10 +1345,22 @@ impl<'db> Tx<'db> {
             // rollback.
             let mut n = 0;
 
-            // todo!();
+            // TODO: handle partial writes
+            let db_file = db.file.as_mut().unwrap();
+            let sync_policy = db.config.sync_policy.clone();
+
+            if let Err(e) = db.file.as_mut().unwrap().write_all(&db.buf) {
+                drop(db);
+                self.rollback_inner();
+                // TODO: return error
+            }
+
+            if sync_policy == SyncPolicy::Always {
+                let _ = self.db.as_mut().unwrap().file.as_mut().unwrap().sync_all();
+            }
 
             // Increment the number of flushes. The background syncing uses this.
-            db.flushes += 1;
+            self.db.as_mut().unwrap().flushes += 1;
         }
         // Unlock the database and allow for another writable transaction.
         self.unlock();
@@ -1371,8 +1395,19 @@ impl<'db> Tx<'db> {
     // doing ad-hoc compares inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no less
     // function bound to the index
-    fn get_less(&self, index: String) -> Result<(), DbError> {
-        todo!()
+    fn get_less(&self, index: String) -> Result<Arc<dyn Fn(String, String) -> bool>, DbError> {
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        }
+
+        let db = self.db.as_ref().unwrap();
+        if let Some(idx) = db.idxs.get(&index) {
+            if let Some(less_fn) = idx.less.clone() {
+                return Ok(less_fn);
+            }
+        }
+
+        Err(DbError::NotFound)
     }
 
     // GetRect returns the rect function for an index. This is handy for
@@ -1639,7 +1674,9 @@ impl<'db> Tx<'db> {
         } else {
             if gt {
                 if lt {
-                    todo!()
+                    // tr.ascend(maybe_pivot, |item| {
+                    //     bLT(tr, item, ) && iterator(&item.key, &item.val);
+                    // });
                 } else {
                     todo!()
                 }
@@ -1662,9 +1699,9 @@ impl<'db> Tx<'db> {
     }
 
     // AscendKeys allows for iterating through keys based on the specified pattern.
-    fn ascend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DbError>
+    fn ascend_keys<F>(&mut self, pattern: &str, iterator: F) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
         todo!()
     }
@@ -1698,14 +1735,14 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     fn ascend_greater_or_equal<F>(
         &mut self,
-        index: String,
-        pivot: String,
+        index: &str,
+        pivot: &str,
         iterator: F,
     ) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(false, true, false, index, pivot, "", iterator)
     }
 
     // AscendLessThan calls the iterator for every item in the database within the
@@ -1714,16 +1751,11 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_less_than<F>(
-        &mut self,
-        index: String,
-        pivot: String,
-        iterator: F,
-    ) -> Result<(), DbError>
+    fn ascend_less_than<F>(&mut self, index: &str, pivot: &str, iterator: F) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(false, false, true, index, pivot, "", iterator)
     }
 
     // AscendRange calls the iterator for every item in the database within
@@ -1734,15 +1766,23 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     fn ascend_range<F>(
         &mut self,
-        index: String,
-        greater_or_equal: String,
-        less_than: String,
+        index: &str,
+        greater_or_equal: &str,
+        less_than: &str,
         iterator: F,
     ) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(
+            false,
+            true,
+            true,
+            index,
+            greater_or_equal,
+            less_than,
+            iterator,
+        )
     }
 
     // Descend calls the iterator for every item in the database within the range
@@ -1751,11 +1791,11 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend<F>(&mut self, index: String, iterator: F) -> Result<(), DbError>
+    fn descend<F>(&mut self, index: &str, iterator: F) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(true, false, false, index, "", "", iterator)
     }
 
     // DescendGreaterThan calls the iterator for every item in the database within
@@ -1766,14 +1806,14 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     fn descend_greater_than<F>(
         &mut self,
-        index: String,
-        pivot: String,
+        index: &str,
+        pivot: &str,
         iterator: F,
     ) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(true, true, false, index, pivot, "", iterator)
     }
 
     // DescendLessOrEqual calls the iterator for every item in the database within
@@ -1784,14 +1824,14 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     fn descend_less_or_equal<F>(
         &mut self,
-        index: String,
-        pivot: String,
+        index: &str,
+        pivot: &str,
         iterator: F,
     ) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(true, false, true, index, pivot, "", iterator)
     }
 
     // DescendRange calls the iterator for every item in the database within
@@ -1802,15 +1842,23 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     fn descend_range<F>(
         &mut self,
-        index: String,
-        less_or_equal: String,
-        greater_than: String,
+        index: &str,
+        less_or_equal: &str,
+        greater_than: &str,
         iterator: F,
     ) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        self.scan(
+            true,
+            true,
+            true,
+            index,
+            less_or_equal,
+            greater_than,
+            iterator,
+        )
     }
 
     // AscendEqual calls the iterator for every item in the database that equals
@@ -1819,11 +1867,29 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DbError>
+    fn ascend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        let mut less_fn = None;
+        if !index.is_empty() {
+            less_fn = Some(self.get_less(index.to_string())?);
+        }
+
+        self.ascend_greater_or_equal(&index, &pivot, |k, v| {
+            if let Some(less_fn_) = &less_fn {
+                if less_fn_(pivot.to_string(), v.to_string()) {
+                    eprintln!("less fn true, stop");
+                    return false;
+                }
+            } else if k != pivot {
+                eprintln!("k != pivot, stop");
+                return false;
+            }
+            let i = iterator(k, v);
+            eprintln!("iter result {}", i);
+            i
+        })
     }
 
     // DescendEqual calls the iterator for every item in the database that equals
@@ -1832,11 +1898,25 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend_equal<F>(&mut self, index: String, pivot: String, iterator: F) -> Result<(), DbError>
+    fn descend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        let mut less_fn = None;
+        if !index.is_empty() {
+            less_fn = Some(self.get_less(index.to_string())?);
+        }
+
+        self.descend_less_or_equal(&index, &pivot, |k, v| {
+            if let Some(less_fn_) = &less_fn {
+                if less_fn_(v.to_string(), pivot.to_string()) {
+                    return false;
+                }
+            } else if k != pivot {
+                return false;
+            }
+            iterator(k, v)
+        })
     }
 
     // Nearby searches for rectangle items that are nearby a target rect.
@@ -1978,7 +2058,7 @@ mod tests {
 
     fn test_close(db: Db) {
         let _ = db.close();
-        let _ = std::fs::remove_file("data.db");
+        // let _ = std::fs::remove_file("data.db");
     }
 
     #[test]
@@ -2210,6 +2290,55 @@ mod tests {
         .unwrap();
         assert_eq!(res, "aa:22\nbb:11\n");
         assert_eq!(res2, "bb:11\naa:22\n");
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_ascend_equal() {
+        let mut db = test_open();
+
+        db.update(|tx| {
+            for i in 0..300 {
+                tx.set(format!("key:{:05}A", i), format!("{}", i + 1000), None)
+                    .unwrap();
+                tx.set(format!("key:{:05}B", i), format!("{}", i + 1000), None)
+                    .unwrap();
+            }
+            tx.create_index(
+                "num".to_string(),
+                "*".to_string(),
+                vec![Arc::new(index_int)],
+            )
+        })
+        .unwrap();
+
+        let mut res = vec![];
+        let res_mut = &mut res;
+        db.view(|tx| {
+            tx.ascend_equal("", "key:00055A", |k, _| {
+                res_mut.push(k.to_string());
+                true
+            })
+        })
+        .unwrap();
+
+        assert_eq!(res.len(), 1);
+        assert_eq!(res, svec!["key:00055A"]);
+
+        res = vec![];
+        let res_mut = &mut res;
+
+        db.view(|tx| {
+            tx.ascend_equal("num", "1125", |k, _| {
+                res_mut.push(k.to_string());
+                true
+            })
+        })
+        .unwrap();
+
+        assert_eq!(res.len(), 2);
+        assert_eq!(res, svec!["key:00125A", "key:00125B"]);
 
         test_close(db);
     }
