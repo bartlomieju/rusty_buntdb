@@ -738,6 +738,7 @@ struct Index {
 impl Index {
     pub fn matches(&self, key: &str) -> bool {
         let mut key = key.to_string();
+        eprintln!("matches {}", self.pattern);
         if self.pattern == "*" {
             return true;
         }
@@ -774,6 +775,7 @@ impl Index {
             // TODO:
             let less_fn = nidx.less.clone().unwrap();
             let compare_fn = Box::new(move |a: &DbItem, b: &DbItem| {
+                eprintln!("index compare fn");
                 // TODO: remove these clones
                 if less_fn(a.val.clone(), b.val.clone()) {
                     return Ordering::Greater;
@@ -802,11 +804,26 @@ impl Index {
 
     // `rebuild` rebuilds the index
     pub fn rebuild(&mut self, db: &Db) {
+        eprintln!("rebuild index");
         // initialize trees
-        if self.less.is_some() {
+        if let Some(less_fn) = self.less.clone() {
             // TODO: less_ctx(self)
-            self.btr = Some(BTreeC::new(Box::new(|a: &DbItem, b: &DbItem| {
-                Ordering::Equal
+            self.btr = Some(BTreeC::new(Box::new(move |a: &DbItem, b: &DbItem| {
+                // using an index less_fn
+                if less_fn(a.val.clone(), b.val.clone()) {
+                    return Ordering::Less;
+                }
+                if less_fn(b.val.clone(), a.val.clone()) {
+                    return Ordering::Greater;
+                }
+
+                // Always fall back to the key comparison. This creates absolute uniqueness.
+                if a.keyless {
+                    return Ordering::Less;
+                } else if b.keyless {
+                    return Ordering::Greater;
+                }
+                a.key.cmp(&b.key)
             })));
         }
         if self.rect.is_some() {
@@ -815,6 +832,7 @@ impl Index {
         }
         // iterate through all keys and fill the index
         db.keys.ascend(None, |item| {
+            eprintln!("rebuild ascend");
             if !self.matches(&item.key) {
                 // does not match the pattern continue
                 return true;
@@ -822,6 +840,7 @@ impl Index {
             if self.less.is_some() {
                 // FIXME: this should probably be an Arc or Rc
                 // instead of a copy
+                eprintln!("added to index");
                 self.btr.as_mut().unwrap().set(item.to_owned());
             }
             if self.rect.is_some() {
@@ -1074,6 +1093,7 @@ impl<'db> Tx<'db> {
             }
         };
 
+        eprintln!("creating index");
         let mut pattern = pattern;
         let options = opts.unwrap_or_default();
         if options.case_insensitive_key_matching {
@@ -1553,6 +1573,7 @@ impl<'db> Tx<'db> {
         } else {
             if let Some(idx) = db.idxs.get(index) {
                 if let Some(btr) = &idx.btr {
+                    eprintln!("using index {}", btr.count());
                     tr = btr;
                 } else {
                     return Ok(());
@@ -1603,7 +1624,11 @@ impl<'db> Tx<'db> {
             } else if lt {
                 todo!()
             } else {
-                tr.descend(None, |item| iterator(&item.key, &item.val));
+                tr.descend(None, |item| {
+                    let val = iterator(&item.key, &item.val);
+                    eprintln!("tr descend {:#?} {}", item.key, val);
+                    val
+                });
             }
         } else {
             if gt {
@@ -1615,7 +1640,11 @@ impl<'db> Tx<'db> {
             } else if lt {
                 todo!()
             } else {
-                tr.ascend(None, |item| iterator(&item.key, &item.val));
+                tr.ascend(None, |item| {
+                    let val = iterator(&item.key, &item.val);
+                    eprintln!("tr ascend {:#?} {}", item.key, val);
+                    val
+                });
             }
         }
 
@@ -1865,6 +1894,7 @@ struct Rect {
 
 // index_int is a helper function that returns true if 'a` is less than 'b'
 fn index_int(a: String, b: String) -> bool {
+    eprintln!("index int");
     let ia = a.parse::<i32>().unwrap();
     let ib = b.parse::<i32>().unwrap();
     ia < ib
@@ -1913,6 +1943,7 @@ mod tests {
             let mut vals = vec![];
 
             tx.ascend(index.to_string(), |key, val| {
+                eprintln!("ascend {} {}", key, val);
                 vals.push(key.to_string());
                 vals.push(val.to_string());
                 true
@@ -1934,7 +1965,7 @@ mod tests {
         db.update(|tx| {
             tx.set("1".to_string(), "3".to_string(), None);
             tx.set("2".to_string(), "2".to_string(), None);
-            tx.set("1".to_string(), "1".to_string(), None);
+            tx.set("3".to_string(), "1".to_string(), None);
             tx.create_index(
                 "idx1".to_string(),
                 "*".to_string(),
