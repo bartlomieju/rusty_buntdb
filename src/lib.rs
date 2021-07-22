@@ -57,6 +57,10 @@ pub enum DbError {
 
     // ErrTxIterating is returned when Set or Delete are called while iterating.
     TxIterating,
+
+    // FIXME: there should be more general error handling than relying on internal
+    // type for user errors
+    Custom(String),
 }
 
 impl fmt::Display for DbError {
@@ -74,6 +78,7 @@ impl fmt::Display for DbError {
             ShrinkInProcess => write!(f, "shrink is in-process"),
             PersistenceActive => write!(f, "persistence active"),
             TxIterating => write!(f, "tx is iterating"),
+            Custom(s) => write!(f, "{}", s),
         }
     }
 }
@@ -568,7 +573,7 @@ impl Db {
     /// returned to the caller. A nil return value means that the item was not
     /// found in the database
     pub fn delete_from_database(&mut self, item: DbItem) -> Option<DbItem> {
-        let maybe_prev = self.keys.set(item.clone()).map(|p| p.to_owned());
+        let maybe_prev = self.keys.delete(item.clone()).map(|p| p.to_owned());
 
         if let Some(prev) = &maybe_prev {
             if let Some(opts) = &prev.opts {
@@ -738,7 +743,6 @@ struct Index {
 impl Index {
     pub fn matches(&self, key: &str) -> bool {
         let mut key = key.to_string();
-        eprintln!("matches {}", self.pattern);
         if self.pattern == "*" {
             return true;
         }
@@ -772,16 +776,16 @@ impl Index {
 
         // initialize with empty trees
         if nidx.less.is_some() {
-            // TODO:
+            // TODO: duplicated in `rebuild`
             let less_fn = nidx.less.clone().unwrap();
             let compare_fn = Box::new(move |a: &DbItem, b: &DbItem| {
                 eprintln!("index compare fn");
                 // TODO: remove these clones
                 if less_fn(a.val.clone(), b.val.clone()) {
-                    return Ordering::Greater;
+                    return Ordering::Less;
                 }
                 if less_fn(b.val.clone(), a.val.clone()) {
-                    return Ordering::Less;
+                    return Ordering::Greater;
                 }
 
                 if a.keyless {
@@ -810,6 +814,7 @@ impl Index {
             // TODO: less_ctx(self)
             self.btr = Some(BTreeC::new(Box::new(move |a: &DbItem, b: &DbItem| {
                 // using an index less_fn
+                eprintln!("btr compare a: {}, b: {}", a.val, b.val);
                 if less_fn(a.val.clone(), b.val.clone()) {
                     return Ordering::Less;
                 }
@@ -832,7 +837,7 @@ impl Index {
         }
         // iterate through all keys and fill the index
         db.keys.ascend(None, |item| {
-            eprintln!("rebuild ascend");
+            eprintln!("rebuild ascend {} {}", item.key, item.val);
             if !self.matches(&item.key) {
                 // does not match the pattern continue
                 return true;
@@ -840,7 +845,7 @@ impl Index {
             if self.less.is_some() {
                 // FIXME: this should probably be an Arc or Rc
                 // instead of a copy
-                eprintln!("added to index");
+                eprintln!("added to index a: {} b: {}", item.key, item.val);
                 self.btr.as_mut().unwrap().set(item.to_owned());
             }
             if self.rect.is_some() {
@@ -1281,6 +1286,7 @@ impl<'db> Tx<'db> {
                 // When an index is not None, we will need to rebuild that index
                 // this could an expensive process if the database has many
                 // items or the index is complex.
+                eprintln!("rebuilding index {}", name);
                 idx.rebuild(db);
                 db.idxs.insert(name, idx);
             }
@@ -1894,7 +1900,7 @@ struct Rect {
 
 // index_int is a helper function that returns true if 'a` is less than 'b'
 fn index_int(a: String, b: String) -> bool {
-    eprintln!("index int");
+    eprintln!("index int a: {} b: {}", a, b);
     let ia = a.parse::<i32>().unwrap();
     let ib = b.parse::<i32>().unwrap();
     ia < ib
@@ -1972,6 +1978,104 @@ mod tests {
                 vec![Arc::new(index_int)],
             )?;
             ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
+            Ok(())
+        })
+        .unwrap();
+
+        // test to see if the items persisted from previous transaction
+        // test add item.
+        // test force rollback.
+        db.update::<_, ()>(|tx| {
+            ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
+            tx.set("4".to_string(), "0".to_string(), None);
+            ascend_equal(tx, "idx1", svec!["4", "0", "3", "1", "2", "2", "1", "3"]);
+            Err(DbError::Custom("this is fine".to_string()))
+        })
+        .unwrap_err();
+
+        // test to see if rollback happened
+        db.view(|tx| {
+            ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
+            Ok(())
+        });
+
+        // del item, drop index, rollback
+        db.update::<_, ()>(|tx| {
+            tx.drop_index("idx1".to_string()).unwrap();
+            Err(DbError::Custom("this is fine".to_string()))
+        })
+        .unwrap_err();
+
+        // test to see if rollback happened
+        db.view(|tx| {
+            ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
+            Ok(())
+        })
+        .unwrap();
+
+        fn various(tx: &mut Tx) {
+            // del item 3, add index 2, add item 4, test index 1 and 2.
+            // flushdb, test index 1 and 2.
+            // add item 1 and 2, add index 2 and 3, test index 2 and 3
+            tx.delete("3".to_string()).unwrap();
+            tx.create_index(
+                "idx2".to_string(),
+                "*".to_string(),
+                vec![Arc::new(index_int)],
+            )
+            .unwrap();
+            tx.set("4".to_string(), "0".to_string(), None);
+            ascend_equal(tx, "idx1", svec!["4", "0", "2", "2", "1", "3"]);
+            ascend_equal(tx, "idx2", svec!["4", "0", "2", "2", "1", "3"]);
+            tx.delete_all();
+            ascend_equal(tx, "idx1", svec![]);
+            ascend_equal(tx, "idx2", svec![]);
+            tx.set("1".to_string(), "3".to_string(), None);
+            tx.set("2".to_string(), "2".to_string(), None);
+            // FIXME: there should be unwraps here, but it panics on `IndexExists`.
+            // It seems these are spurious? Indexes are not deleted by `delete_all()`
+            tx.create_index(
+                "idx1".to_string(),
+                "*".to_string(),
+                vec![Arc::new(index_int)],
+            );
+            tx.create_index(
+                "idx2".to_string(),
+                "*".to_string(),
+                vec![Arc::new(index_int)],
+            );
+            ascend_equal(tx, "idx1", svec!["2", "2", "1", "3"]);
+            ascend_equal(tx, "idx2", svec!["2", "2", "1", "3"]);
+        }
+
+        // various rollback
+        db.update::<_, ()>(|tx| {
+            various(tx);
+            Err(DbError::Custom("this is fine".to_string()))
+        })
+        .unwrap_err();
+
+        // test to see if the rollback happened
+        db.view(|tx| {
+            ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
+            let err = tx.ascend("idx2".to_string(), |_, _| true).unwrap_err();
+            assert_eq!(err, DbError::NotFound);
+
+            Ok(())
+        })
+        .unwrap();
+
+        // various commit
+        db.update(|tx| {
+            various(tx);
+            Ok(())
+        })
+        .unwrap();
+
+        // test to see if commit happened
+        db.view(|tx| {
+            ascend_equal(tx, "idx1", svec!["2", "2", "1", "3"]);
+            ascend_equal(tx, "idx2", svec!["2", "2", "1", "3"]);
             Ok(())
         })
         .unwrap();
