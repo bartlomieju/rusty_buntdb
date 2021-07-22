@@ -21,7 +21,7 @@ use std::time;
 
 type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DbError {
     // ErrTxNotWritable is returned when performing a write operation on a
     // read-only transaction.
@@ -2361,7 +2361,8 @@ mod tests {
                 "*".to_string(),
                 vec![Arc::new(index_int)],
             )
-        }).unwrap();
+        })
+        .unwrap();
 
         let mut res = vec![];
         let res_mut = &mut res;
@@ -2389,6 +2390,75 @@ mod tests {
 
         assert_eq!(res.len(), 2);
         assert_eq!(res, svec!["key:00125A", "key:00125B"]);
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_various_tx() {
+        let mut db = test_open();
+
+        db.update(|tx| {
+            tx.set("hello".to_string(), "planet".to_string(), None);
+            Ok(())
+        })
+        .unwrap();
+
+        let err_broken = DbError::Custom("broken".to_string());
+        let e = db
+            .update::<_, ()>(|tx| {
+                tx.set("hello".to_string(), "world".to_string(), None);
+                Err(err_broken.clone())
+            })
+            .unwrap_err();
+        assert_eq!(e, err_broken);
+
+        let val = db.view(|tx| tx.get("hello".to_string(), true)).unwrap();
+        assert_eq!(val, "planet");
+
+        db.update(|tx| {
+            let saved_db = tx.db.take().unwrap();
+            let e = tx
+                .set("hello".to_string(), "planet".to_string(), None)
+                .unwrap_err();
+            assert_eq!(e, DbError::TxClosed);
+            let e = tx.delete("hello".to_string()).unwrap_err();
+            assert_eq!(e, DbError::TxClosed);
+            let e = tx.get("hello".to_string(), true).unwrap_err();
+            assert_eq!(e, DbError::TxClosed);
+
+            tx.db = Some(saved_db);
+            tx.writable = false;
+            let e = tx
+                .set("hello".to_string(), "planet".to_string(), None)
+                .unwrap_err();
+            assert_eq!(e, DbError::TxNotWritable);
+            let e = tx.delete("hello".to_string()).unwrap_err();
+            assert_eq!(e, DbError::TxNotWritable);
+            tx.writable = true;
+
+            let e = tx.get("something".to_string(), true).unwrap_err();
+            assert_eq!(e, DbError::NotFound);
+            let e = tx.delete("something".to_string()).unwrap_err();
+            assert_eq!(e, DbError::NotFound);
+
+            tx.set(
+                "var".to_string(),
+                "val".to_string(),
+                Some(SetOptions {
+                    expires: true,
+                    ttl: time::Duration::from_secs(0),
+                }),
+            )
+            .unwrap();
+            let e = tx.get("something".to_string(), true).unwrap_err();
+            assert_eq!(e, DbError::NotFound);
+            let e = tx.delete("something".to_string()).unwrap_err();
+            assert_eq!(e, DbError::NotFound);
+
+            Ok(())
+        })
+        .unwrap();
 
         test_close(db);
     }
