@@ -1906,6 +1906,51 @@ fn index_int(a: String, b: String) -> bool {
     ia < ib
 }
 
+// IndexString is a helper function that return true if 'a' is less than 'b'.
+// This is a case-insensitive comparison. Use the IndexBinary() for comparing
+// case-sensitive strings.
+fn index_string(a: String, b: String) -> bool {
+    let min_len = std::cmp::min(a.len(), b.len());
+    let a_chars = a.chars().collect::<Vec<_>>();
+    let b_chars = b.chars().collect::<Vec<_>>();
+
+    for i in 0..min_len {
+        if a_chars[i] >= 'A' && a_chars[i] <= 'Z' {
+            if b_chars[i] >= 'A' && b_chars[i] <= 'Z' {
+                // both are upper case, do nothing
+                if a_chars[i] < b_chars[i] {
+                    return true;
+                } else if a_chars[i] > b_chars[i] {
+                    return true;
+                }
+            } else {
+                // a is uppercase, convert to lowercase
+                if a_chars[i].to_ascii_lowercase() < b_chars[i] {
+                    return true;
+                } else if a_chars[i].to_ascii_lowercase() > b_chars[i] {
+                    return true;
+                }
+            }
+        } else if b_chars[i] >= 'A' && b_chars[i] <= 'Z' {
+            // a is uppercase, convert to lowercase
+            if a_chars[i] < b_chars[i].to_ascii_lowercase() {
+                return true;
+            } else if a_chars[i] > b_chars[i].to_ascii_lowercase() {
+                return true;
+            }
+        } else {
+            // neither are uppercase
+            if a_chars[i] < b_chars[i] {
+                return true;
+            } else if a_chars[i] > b_chars[i] {
+                return false;
+            }
+        }
+    }
+
+    a.len() < b.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2079,6 +2124,92 @@ mod tests {
             Ok(())
         })
         .unwrap();
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_delete_all() {
+        let mut db = test_open();
+
+        db.update(|tx| {
+            tx.set("hello1".to_string(), "planet1".to_string(), None);
+            tx.set("hello2".to_string(), "planet2".to_string(), None);
+            tx.set("hello3".to_string(), "planet3".to_string(), None);
+            Ok(())
+        })
+        .unwrap();
+        db.create_index(
+            "all".to_string(),
+            "*".to_string(),
+            vec![Arc::new(index_string)],
+        )
+        .unwrap();
+        db.update(|tx| {
+            tx.set("hello1".to_string(), "planet1.1".to_string(), None);
+            tx.delete_all();
+            tx.set("bb".to_string(), "11".to_string(), None);
+            tx.set("aa".to_string(), "**".to_string(), None);
+            tx.delete("aa".to_string());
+            tx.set("aa".to_string(), "22".to_string(), None);
+            Ok(())
+        })
+        .unwrap();
+        let mut res = String::new();
+        let mut res2 = String::new();
+        db.view(|tx| {
+            tx.ascend("".to_string(), |key, val| {
+                res.push_str(key);
+                res.push_str(":");
+                res.push_str(val);
+                res.push_str("\n");
+                true
+            })
+            .unwrap();
+            tx.ascend("all".to_string(), |key, val| {
+                res2.push_str(key);
+                res2.push_str(":");
+                res2.push_str(val);
+                res2.push_str("\n");
+                true
+            })
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(res, "aa:22\nbb:11\n");
+        assert_eq!(res2, "bb:11\naa:22\n");
+        db = test_reopen(Some(db));
+        res = String::new();
+        res2 = String::new();
+        db.create_index(
+            "all".to_string(),
+            "*".to_string(),
+            vec![Arc::new(index_string)],
+        )
+        .unwrap();
+        db.view(|tx| {
+            tx.ascend("".to_string(), |key, val| {
+                res.push_str(key);
+                res.push_str(":");
+                res.push_str(val);
+                res.push_str("\n");
+                true
+            })
+            .unwrap();
+            tx.ascend("all".to_string(), |key, val| {
+                res2.push_str(key);
+                res2.push_str(":");
+                res2.push_str(val);
+                res2.push_str("\n");
+                true
+            })
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(res, "aa:22\nbb:11\n");
+        assert_eq!(res2, "bb:11\naa:22\n");
 
         test_close(db);
     }
