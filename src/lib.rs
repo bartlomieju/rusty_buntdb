@@ -418,7 +418,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
+        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
     ) -> Result<(), DbError> {
         self.update(move |tx| tx.create_index(name, pattern, less))
     }
@@ -431,7 +431,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
+        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
     ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
@@ -740,7 +740,7 @@ struct Index {
     pattern: String,
 
     /// less comparison function
-    less: Option<Arc<dyn Fn(String, String) -> bool>>,
+    less: Option<Arc<dyn Fn(&str, &str) -> bool>>,
 
     /// rect from string function
     rect: Option<RectFn>,
@@ -793,17 +793,17 @@ impl Index {
             let less_fn = nidx.less.clone().unwrap();
             let compare_fn = Box::new(move |a: &DbItem, b: &DbItem| {
                 // TODO: remove these clones
-                if less_fn(a.val.clone(), b.val.clone()) {
+                if less_fn(&a.val, &b.val) {
                     return Ordering::Less;
                 }
-                if less_fn(b.val.clone(), a.val.clone()) {
+                if less_fn(&b.val, &a.val) {
                     return Ordering::Greater;
                 }
 
                 if a.keyless {
-                    return Ordering::Less;
-                } else if b.keyless {
                     return Ordering::Greater;
+                } else if b.keyless {
+                    return Ordering::Less;
                 }
                 a.key.cmp(&b.key)
             });
@@ -824,19 +824,21 @@ impl Index {
         if let Some(less_fn) = self.less.clone() {
             // TODO: less_ctx(self)
             self.btr = Some(BTreeC::new(Box::new(move |a: &DbItem, b: &DbItem| {
+                eprintln!("index compare fn a: {} b: {}", a.val, b.val);
                 // using an index less_fn
-                if less_fn(a.val.clone(), b.val.clone()) {
+                if less_fn(&a.val, &b.val) {
                     return Ordering::Less;
                 }
-                if less_fn(b.val.clone(), a.val.clone()) {
+                eprintln!("second index compare fn a: {} b: {}", a.val, b.val);
+                if less_fn(&b.val, &a.val) {
                     return Ordering::Greater;
                 }
 
                 // Always fall back to the key comparison. This creates absolute uniqueness.
                 if a.keyless {
-                    return Ordering::Less;
-                } else if b.keyless {
                     return Ordering::Greater;
+                } else if b.keyless {
+                    return Ordering::Less;
                 }
                 a.key.cmp(&b.key)
             })));
@@ -1056,7 +1058,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        lessers: Vec<Arc<dyn Fn(String, String) -> bool>>,
+        lessers: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
         rect: Option<RectFn>,
         opts: Option<IndexOptions>,
     ) -> Result<(), DbError> {
@@ -1156,7 +1158,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
+        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, None)
     }
@@ -1168,7 +1170,7 @@ impl<'db> Tx<'db> {
         name: String,
         pattern: String,
         opts: IndexOptions,
-        less: Vec<Arc<dyn Fn(String, String) -> bool>>,
+        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, Some(opts))
     }
@@ -1391,7 +1393,7 @@ impl<'db> Tx<'db> {
     // doing ad-hoc compares inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no less
     // function bound to the index
-    fn get_less(&self, index: String) -> Result<Arc<dyn Fn(String, String) -> bool>, DbError> {
+    fn get_less(&self, index: String) -> Result<Arc<dyn Fn(&str, &str) -> bool>, DbError> {
         if self.db.is_none() {
             return Err(DbError::TxClosed);
         }
@@ -1878,8 +1880,12 @@ impl<'db> Tx<'db> {
         }
 
         self.ascend_greater_or_equal(&index, &pivot, |k, v| {
+            eprintln!(
+                "ascend greater or eqal pivot: {:#?}, key: {}, val: {}",
+                pivot, k, v
+            );
             if let Some(less_fn_) = &less_fn {
-                if less_fn_(pivot.to_string(), v.to_string()) {
+                if less_fn_(pivot, v) {
                     eprintln!("less fn true, stop {} {}", pivot, v);
                     return false;
                 }
@@ -1911,7 +1917,7 @@ impl<'db> Tx<'db> {
 
         self.descend_less_or_equal(&index, &pivot, |k, v| {
             if let Some(less_fn_) = &less_fn {
-                if less_fn_(v.to_string(), pivot.to_string()) {
+                if less_fn_(v, pivot) {
                     eprintln!("less fn false, stop");
                     return false;
                 }
@@ -2010,8 +2016,15 @@ fn btree_ascend_greater_or_equal<F>(tree: &BTreeC<DbItem>, pivot: Option<DbItem>
 where
     F: FnMut(&str, &str) -> bool,
 {
-    eprintln!("ascent greater or equal pivot, key: {} val: {}", pivot.as_ref().unwrap().key, pivot.as_ref().unwrap().val);
-    tree.ascend(pivot, |item| iterator(&item.key, &item.val));
+    eprintln!(
+        "ascent greater or equal pivot, key: {} val: {}",
+        pivot.as_ref().unwrap().key,
+        pivot.as_ref().unwrap().val
+    );
+    tree.ascend(pivot, |item| {
+        eprintln!("tree ascend key: {} val: {}", item.key, item.val);
+        iterator(&item.key, &item.val)
+    });
     eprintln!("called tree ascend");
 }
 
@@ -2063,7 +2076,11 @@ fn btree_descend_less_or_equal<F>(tree: &BTreeC<DbItem>, pivot: Option<DbItem>, 
 where
     F: FnMut(&str, &str) -> bool,
 {
-    eprintln!("descent less or equal pivot, key: {} val: {}", pivot.as_ref().unwrap().key, pivot.as_ref().unwrap().val);
+    eprintln!(
+        "descent less or equal pivot, key: {} val: {}",
+        pivot.as_ref().unwrap().key,
+        pivot.as_ref().unwrap().val
+    );
     tree.descend(pivot, |item| {
         eprintln!("called!");
         iterator(&item.key, &item.val)
@@ -2071,16 +2088,17 @@ where
 }
 
 // index_int is a helper function that returns true if 'a` is less than 'b'
-fn index_int(a: String, b: String) -> bool {
+fn index_int(a: &str, b: &str) -> bool {
     let ia = a.parse::<i32>().unwrap();
     let ib = b.parse::<i32>().unwrap();
+    eprintln!("index_int a: {} b: {}", ia, ib);
     ia < ib
 }
 
 // IndexString is a helper function that return true if 'a' is less than 'b'.
 // This is a case-insensitive comparison. Use the IndexBinary() for comparing
 // case-sensitive strings.
-fn index_string(a: String, b: String) -> bool {
+fn index_string(a: &str, b: &str) -> bool {
     let min_len = std::cmp::min(a.len(), b.len());
     let a_chars = a.chars().collect::<Vec<_>>();
     let b_chars = b.chars().collect::<Vec<_>>();
@@ -2406,16 +2424,16 @@ mod tests {
 
         let mut res = vec![];
         let res_mut = &mut res;
-        // db.view(|tx| {
-        //     tx.ascend_equal("", "key:00055A", |k, _| {
-        //         res_mut.push(k.to_string());
-        //         true
-        //     })
-        // })
-        // .unwrap();
+        db.view(|tx| {
+            tx.ascend_equal("", "key:00055A", |k, _| {
+                res_mut.push(k.to_string());
+                true
+            })
+        })
+        .unwrap();
 
-        // assert_eq!(res.len(), 1);
-        // assert_eq!(res, svec!["key:00055A"]);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res, svec!["key:00055A"]);
 
         res = vec![];
         let res_mut = &mut res;
