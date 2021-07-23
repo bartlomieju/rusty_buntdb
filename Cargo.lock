@@ -5,6 +5,8 @@ version = 3
 [[package]]
 name = "btreec"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9ecf2a14fa94fd9d38fc6a7dd9693173f55780de7770af319bf65c2c1011cd8"
 dependencies = [
  "cc",
  "libc",
