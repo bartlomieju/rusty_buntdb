@@ -21,6 +21,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time;
 
+mod matcher;
+
 type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
 type LessFn = Arc<dyn Fn(&str, &str) -> bool>;
 
@@ -786,9 +788,7 @@ impl Index {
             }
         }
 
-        // TODO: need to port https://github.com/tidwall/match package
-        let r = self.pattern.matches(&key).peekable().peek().is_some();
-        r
+        matcher::matches(&key, &self.pattern)
     }
 
     // `clear_copy` creates a copy of the index, but with an empty dataset.
@@ -1720,19 +1720,77 @@ impl<'db> Tx<'db> {
     }
 
     // AscendKeys allows for iterating through keys based on the specified pattern.
-    fn ascend_keys<F>(&mut self, pattern: &str, iterator: F) -> Result<(), DbError>
+    fn ascend_keys<F>(&mut self, pattern: &str, mut iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
-        todo!()
+        if pattern.is_empty() {
+            return Ok(());
+        }
+
+        if pattern.chars().nth(0).unwrap() == '*' {
+            if pattern == "*" {
+                return self.ascend("".to_string(), iterator);
+            }
+            return self.ascend("".to_string(), |k, v| {
+                if matcher::matches(k, pattern) {
+                    if !iterator(k, v) {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+
+        let (min, max) = matcher::allowable(pattern);
+        self.ascend_greater_or_equal("", &min, |k, v| {
+            if k > &max {
+                return false;
+            }
+            if matcher::matches(k, pattern) {
+                if !iterator(k, v) {
+                    return false;
+                }
+            }
+            true
+        })
     }
 
     // DescendKeys allows for iterating through keys based on the specified pattern.
-    fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DbError>
+    fn descend_keys<F>(&mut self, pattern: &str, mut iterator: F) -> Result<(), DbError>
     where
-        F: Fn(String, String) -> bool,
+        F: Fn(&str, &str) -> bool,
     {
-        todo!()
+        if pattern.is_empty() {
+            return Ok(());
+        }
+
+        if pattern.chars().nth(0).unwrap() == '*' {
+            if pattern == "*" {
+                return self.descend("".to_string(), iterator);
+            }
+            return self.descend("".to_string(), |k, v| {
+                if matcher::matches(k, pattern) {
+                    if !iterator(k, v) {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+
+        let (min, max) = matcher::allowable(pattern);
+        self.descend_less_or_equal("", &min, |k, v| {
+            if k < &max {
+                return false;
+            }
+            if matcher::matches(k, pattern) {
+                if !iterator(k, v) {
+                    return false;
+                }
+            }
+            true
+        })
     }
 
     // Ascend calls the iterator for every item in the database within the range
@@ -2047,10 +2105,7 @@ where
         pivot.as_ref().unwrap().key,
         pivot.as_ref().unwrap().val
     );
-    tree.ascend(pivot, |item| {
-        eprintln!("tree ascend key: {} val: {}", item.key, item.val);
-        iterator(&item.key, &item.val)
-    });
+    tree.ascend(pivot, |item| iterator(&item.key, &item.val));
     eprintln!("called tree ascend");
 }
 
