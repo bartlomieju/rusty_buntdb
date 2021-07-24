@@ -674,6 +674,7 @@ impl Db {
     ///
     /// Executing a manual commit or rollback from inside the function will result
     /// in a panic.
+    // TODO: it should give `&Tx` to the func
     pub fn view<F, R>(&mut self, func: F) -> Result<R, DbError>
     where
         F: FnOnce(&mut Tx) -> Result<R, DbError>,
@@ -1590,8 +1591,28 @@ impl<'db> Tx<'db> {
     // TTL returns the remaining time-to-live for an item.
     // A negative duration will be returned for items that do not have an
     // expiration.
-    fn ttl(&mut self, key: String) -> Result<time::Duration, DbError> {
-        todo!()
+    fn ttl(&mut self, key: String) -> Result<Option<time::Duration>, DbError> {
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        }
+        let db = self.db.as_ref().unwrap();
+        let maybe_item = db.get(key);
+        match maybe_item {
+            None => Err(DbError::NotFound),
+            Some(item) => {
+                if let Some(opts) = &item.opts {
+                    if opts.ex {
+                        let dur = opts.exat.saturating_duration_since(time::Instant::now());
+                        if dur == time::Duration::from_secs(0) {
+                            return Err(DbError::NotFound);
+                        }
+                        return Ok(Some(dur));
+                    }
+                }
+
+                Ok(None)
+            }
+        }
     }
 
     // scan iterates through a specified index and calls user-defined iterator
@@ -2172,7 +2193,6 @@ where
 fn index_int(a: &str, b: &str) -> bool {
     let ia = a.parse::<i32>().unwrap();
     let ib = b.parse::<i32>().unwrap();
-    eprintln!("index_int a: {} b: {}", ia, ib);
     ia < ib
 }
 
@@ -2180,49 +2200,11 @@ fn index_int(a: &str, b: &str) -> bool {
 // This is a case-insensitive comparison. Use the IndexBinary() for comparing
 // case-sensitive strings.
 fn index_string(a: &str, b: &str) -> bool {
-    let min_len = std::cmp::min(a.len(), b.len());
-    let a_chars = a.chars().collect::<Vec<_>>();
-    let b_chars = b.chars().collect::<Vec<_>>();
+    a.to_lowercase().cmp(&b.to_lowercase()) == Ordering::Less
+}
 
-    for i in 0..min_len {
-        if a_chars[i] >= 'A' && a_chars[i] <= 'Z' {
-            if b_chars[i] >= 'A' && b_chars[i] <= 'Z' {
-                // both are upper case, do nothing
-                if a_chars[i] < b_chars[i] {
-                    return true;
-                }
-                if a_chars[i] > b_chars[i] {
-                    return true;
-                }
-            } else {
-                // a is uppercase, convert to lowercase
-                if a_chars[i].to_ascii_lowercase() < b_chars[i] {
-                    return true;
-                }
-                if a_chars[i].to_ascii_lowercase() > b_chars[i] {
-                    return true;
-                }
-            }
-        } else if b_chars[i] >= 'A' && b_chars[i] <= 'Z' {
-            // a is uppercase, convert to lowercase
-            if a_chars[i] < b_chars[i].to_ascii_lowercase() {
-                return true;
-            }
-            if a_chars[i] > b_chars[i].to_ascii_lowercase() {
-                return true;
-            }
-        } else {
-            // neither are uppercase
-            if a_chars[i] < b_chars[i] {
-                return true;
-            }
-            if a_chars[i] > b_chars[i] {
-                return false;
-            }
-        }
-    }
-
-    a.len() < b.len()
+fn index_string_case_sensitive(a: &str, b: &str) -> bool {
+    a.cmp(&b) == Ordering::Less
 }
 
 #[cfg(test)]
@@ -2706,5 +2688,76 @@ mod tests {
             tx.rollback();
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_create_index_strings() {
+        let mut db = Db::open(":memory:").unwrap();
+        let mut collected = vec![];
+        db.create_index(
+            "name".to_string(),
+            "*".to_string(),
+            vec![Arc::new(index_string)],
+        );
+        db.update(|tx| {
+            tx.set("1".to_string(), "Tom".to_string(), None);
+            tx.set("2".to_string(), "Janet".to_string(), None);
+            tx.set("3".to_string(), "Carol".to_string(), None);
+            tx.set("4".to_string(), "Alan".to_string(), None);
+            tx.set("5".to_string(), "Sam".to_string(), None);
+            tx.set("6".to_string(), "Melinda".to_string(), None);
+            Ok(())
+        })
+        .unwrap();
+        db.view(|tx| {
+            tx.ascend("name".to_string(), |k, v| {
+                collected.push(format!("{}: {}", k, v));
+                true
+            });
+            Ok(())
+        });
+        assert_eq!(
+            collected,
+            svec![
+                "4: Alan",
+                "3: Carol",
+                "2: Janet",
+                "6: Melinda",
+                "5: Sam",
+                "1: Tom"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_index_ints() {
+        let mut db = Db::open(":memory:").unwrap();
+        let mut collected = vec![];
+        db.create_index(
+            "age".to_string(),
+            "*".to_string(),
+            vec![Arc::new(index_int)],
+        );
+        db.update(|tx| {
+            tx.set("1".to_string(), "30".to_string(), None);
+            tx.set("2".to_string(), "51".to_string(), None);
+            tx.set("3".to_string(), "16".to_string(), None);
+            tx.set("4".to_string(), "76".to_string(), None);
+            tx.set("5".to_string(), "23".to_string(), None);
+            tx.set("6".to_string(), "43".to_string(), None);
+            Ok(())
+        })
+        .unwrap();
+        db.view(|tx| {
+            tx.ascend("age".to_string(), |k, v| {
+                collected.push(format!("{}: {}", k, v));
+                true
+            });
+            Ok(())
+        });
+        assert_eq!(
+            collected,
+            svec!["3: 16", "5: 23", "1: 30", "6: 43", "2: 51", "4: 76"]
+        );
     }
 }
