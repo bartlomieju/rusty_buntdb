@@ -1990,7 +1990,7 @@ impl<'db> Tx<'db> {
 
 impl<'db> Drop for Tx<'db> {
     fn drop(&mut self) {
-        if !self.db.is_none() && self.has_lock {
+        if self.db.is_some() && self.has_lock {
             self.unlock();
         }
     }
