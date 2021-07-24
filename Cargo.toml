@@ -10,3 +10,4 @@ repository = "https://github.com/bartlomieju/rusty_buntdb"
 [dependencies]
 btreec = { version = "0.1.0" }
 once_cell = "1.8.0"
+parking_lot = "0.11.1"

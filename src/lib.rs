@@ -7,6 +7,8 @@
 
 use btreec::BTreeC;
 use once_cell::sync::OnceCell;
+use parking_lot::lock_api::RawRwLock as _;
+use parking_lot::RawRwLock;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::error::Error;
@@ -91,7 +93,7 @@ impl Error for DbError {}
 /// Transactions are used for all forms of data access to the Db.
 pub struct Db {
     /// the gatekeeper for all fields
-    mu: RwLock<()>,
+    mu: RawRwLock,
 
     /// the underlying file
     file: Option<File>,
@@ -232,7 +234,7 @@ impl Db {
         };
 
         let mut db = Db {
-            mu: RwLock::new(()),
+            mu: RawRwLock::INIT,
             file: None,
             buf: Vec::new(),
             keys: BTreeC::new(Box::new(keys_compare_fn)),
@@ -274,9 +276,10 @@ impl Db {
     /// `close` releases all database resources.
     /// All transactions must be closed before closing the database.
     pub fn close(mut self) -> Result<(), DbError> {
-        let _g = self.mu.write().unwrap();
+        self.mu.lock_exclusive();
 
         if self.closed {
+            unsafe { self.mu.unlock_exclusive() };
             return Err(DbError::DatabaseClosed);
         }
 
@@ -288,6 +291,7 @@ impl Db {
             drop(file);
         }
 
+        unsafe { self.mu.unlock_exclusive() };
         Ok(())
     }
 
@@ -296,7 +300,7 @@ impl Db {
     /// in-memory databases using the ":memory:". Database that persist to disk
     /// can be snapshotted by simply copying the database file.
     pub fn save(&mut self, writer: &mut dyn io::Write) -> Result<(), io::Error> {
-        let _g = self.mu.read().unwrap();
+        self.mu.lock_shared();
         let mut err = None;
         // use a buffered writer and flush every 4MB
         let mut buf = Vec::with_capacity(4 * 1024 * 1024);
@@ -317,6 +321,7 @@ impl Db {
         });
 
         if let Some(e) = err {
+            unsafe { self.mu.unlock_shared() };
             return Err(e);
         }
 
@@ -325,6 +330,7 @@ impl Db {
             writer.write_all(&buf)?;
         }
 
+        unsafe { self.mu.unlock_shared() };
         Ok(())
     }
 
@@ -384,7 +390,7 @@ impl Db {
     /// Note that this can only work for fully in-memory databases opened with
     /// Open(":memory:").
     pub fn load(&mut self, reader: &dyn io::Read) -> Result<(), io::Error> {
-        let _g = self.mu.write().unwrap();
+        self.mu.lock_exclusive();
 
         if self.persist {
             let err = io::Error::new(io::ErrorKind::Other, DbError::PersistenceActive);
@@ -392,6 +398,8 @@ impl Db {
         }
 
         let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
+
+        unsafe { self.mu.unlock_exclusive() };
 
         if let Some(err) = maybe_err {
             return Err(err);
@@ -507,20 +515,25 @@ impl Db {
 
     /// ReadConfig returns the database configuration.
     pub fn read_config(&self) -> Result<Config, DbError> {
-        let _g = self.mu.read().unwrap();
+        self.mu.lock_shared();
         if self.closed {
+            unsafe { self.mu.unlock_shared() };
             return Err(DbError::DatabaseClosed);
         }
-        Ok(self.config.clone())
+        let c = self.config.clone();
+        unsafe { self.mu.unlock_shared() };
+        Ok(c)
     }
 
     /// SetConfig updates the database configuration.
     pub fn set_config(&mut self, config: Config) -> Result<(), DbError> {
-        let _g = self.mu.read().unwrap();
+        self.mu.lock_exclusive();
         if self.closed {
+            unsafe { self.mu.unlock_exclusive() };
             return Err(DbError::DatabaseClosed);
         }
         self.config = config;
+        unsafe { self.mu.unlock_exclusive() };
         Ok(())
     }
 
@@ -699,6 +712,7 @@ impl Db {
     fn begin(&mut self, writable: bool) -> Result<Tx, DbError> {
         let mut tx = Tx {
             db: Some(self),
+            has_lock: false,
             writable,
             funcd: false,
             wc: None,
@@ -707,8 +721,7 @@ impl Db {
         tx.lock();
 
         if tx.db.as_ref().unwrap().closed {
-            // TODO:
-            // tx.unlock();
+            tx.unlock();
             return Err(DbError::DatabaseClosed);
         }
 
@@ -975,6 +988,8 @@ fn append_bulk_string(buf: &mut Vec<u8>, s: &str) {
 pub struct Tx<'db> {
     /// the underlying database.
     db: Option<&'db mut Db>,
+    /// are we currently holding DB lock?
+    has_lock: bool,
     /// when false mutable operations fail.
     writable: bool,
     /// when true Commit and Rollback panic.
@@ -1251,23 +1266,25 @@ impl<'db> Tx<'db> {
     }
 
     // lock locks the database based on the transaction type.
-    fn lock(&self) {
-        // todo!()
-        // if self.writable {
-        //     self.db.mu.write().unwrap();
-        // } else {
-        //     self.db.mu.read().unwrap();
-        // }
+    fn lock(&mut self) {
+        let db = self.db.as_ref().unwrap();
+        if self.writable {
+            db.mu.lock_exclusive();
+        } else {
+            db.mu.lock_shared();
+        }
+        self.has_lock = true;
     }
 
     // unlock unlocks the database based on the transaction type.
-    fn unlock(&self) {
-        // todo!()
-        // if self.writable {
-        //     self.db.mu.unlock();
-        // } else {
-        //     self.db.mu.read_unlock();
-        // }
+    fn unlock(&mut self) {
+        let db = self.db.as_ref().unwrap();
+        if self.writable {
+            unsafe { db.mu.unlock_exclusive() };
+        } else {
+            unsafe { db.mu.unlock_shared() };
+        }
+        self.has_lock = false;
     }
 
     // rollbackInner handles the underlying rollback logic.
@@ -1971,6 +1988,14 @@ impl<'db> Tx<'db> {
     }
 }
 
+impl<'db> Drop for Tx<'db> {
+    fn drop(&mut self) {
+        if !self.db.is_none() && self.has_lock {
+            self.unlock();
+        }
+    }
+}
+
 // SetOptions represents options that may be included with the Set() command.
 struct SetOptions {
     // Expires indicates that the Set() key-value will expire
@@ -2577,17 +2602,20 @@ mod tests {
         let mut tx = db.begin(true).unwrap();
         tx.set("howdy".to_string(), "world".to_string(), None);
         tx.commit().unwrap();
+        drop(tx);
 
         let mut tx1 = db.begin(false).unwrap();
         let v = tx1.get("howdy".to_string(), false).unwrap();
         assert_eq!(v, "world");
         tx1.rollback().unwrap();
+        drop(tx1);
 
         let mut tx2 = db.begin(true).unwrap();
         let v = tx2.get("howdy".to_string(), false).unwrap();
         assert_eq!(v, "world");
         tx2.delete("howdy".to_string()).unwrap();
         tx2.commit();
+        drop(tx2);
 
         // test fo closed transactions
         let err = db
@@ -2597,8 +2625,7 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err, DbError::TxClosed);
-        // TODO:
-        // db.unlock();
+        unsafe { db.mu.unlock_exclusive() };
 
         // test for invalid writes
 
