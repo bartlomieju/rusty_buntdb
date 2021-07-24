@@ -1590,8 +1590,28 @@ impl<'db> Tx<'db> {
     // TTL returns the remaining time-to-live for an item.
     // A negative duration will be returned for items that do not have an
     // expiration.
-    fn ttl(&mut self, key: String) -> Result<time::Duration, DbError> {
-        todo!()
+    fn ttl(&mut self, key: String) -> Result<Option<time::Duration>, DbError> {
+        if self.db.is_none() {
+            return Err(DbError::TxClosed);
+        }
+        let db = self.db.as_ref().unwrap();
+        let maybe_item = db.get(key);
+        match maybe_item {
+            None => Err(DbError::NotFound),
+            Some(item) => {
+                if let Some(opts) = &item.opts {
+                    if opts.ex {
+                        let dur = opts.exat.saturating_duration_since(time::Instant::now());
+                        if dur == time::Duration::from_secs(0) {
+                            return Err(DbError::NotFound);
+                        }
+                        return Ok(Some(dur));
+                    }
+                }
+
+                Ok(None)
+            }
+        }
     }
 
     // scan iterates through a specified index and calls user-defined iterator
