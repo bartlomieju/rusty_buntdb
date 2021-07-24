@@ -1767,9 +1767,9 @@ impl<'db> Tx<'db> {
 
         if pattern.chars().nth(0).unwrap() == '*' {
             if pattern == "*" {
-                return self.descend("".to_string(), iterator);
+                return self.descend("", iterator);
             }
-            return self.descend("".to_string(), |k, v| {
+            return self.descend("", |k, v| {
                 if matcher::matches(k, pattern) {
                     if !iterator(k, v) {
                         return false;
