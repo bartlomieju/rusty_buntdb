@@ -2136,8 +2136,26 @@ where
 
 // index_int is a helper function that returns true if 'a` is less than 'b'
 fn index_int(a: &str, b: &str) -> bool {
-    let ia = a.parse::<i32>().unwrap();
-    let ib = b.parse::<i32>().unwrap();
+    let ia = a.parse::<i64>().unwrap();
+    let ib = b.parse::<i64>().unwrap();
+    ia < ib
+}
+
+// IndexUint is a helper function that returns true if 'a' is less than 'b'.
+// This compares uint64s that are added to the database using the
+// Uint() conversion function.
+fn index_uint(a: &str, b: &str) -> bool {
+    let ia = a.parse::<u64>().unwrap();
+    let ib = b.parse::<u64>().unwrap();
+    ia < ib
+}
+
+// index_float is a helper function that returns true if 'a` is less than 'b'.
+// This compares float64s that are added to the database using the
+// Float() conversion function.
+fn index_float(a: &str, b: &str) -> bool {
+    let ia = a.parse::<f64>().unwrap();
+    let ib = b.parse::<f64>().unwrap();
     ia < ib
 }
 
@@ -2704,5 +2722,131 @@ mod tests {
             collected,
             svec!["3: 16", "5: 23", "1: 30", "6: 43", "2: 51", "4: 76"]
         );
+    }
+
+    #[test]
+    fn test_inserts_and_deleted() {
+        let mut db = test_open();
+
+        db.create_index(
+            "any".to_string(),
+            "*".to_string(),
+            vec![Arc::new(index_string)],
+        )
+        .unwrap();
+        // TODO:
+        // db.create_spatial_index("rect".to_string(), "*".to_string(), vec![Arc::new(index_string)]).unwrap();
+
+        db.update(|tx| {
+            tx.set(
+                "item1".to_string(),
+                "value1".to_string(),
+                Some(SetOptions {
+                    expires: true,
+                    ttl: time::Duration::from_secs(1),
+                }),
+            )?;
+            tx.set("item2".to_string(), "value2".to_string(), None)?;
+            tx.set(
+                "item3".to_string(),
+                "value3".to_string(),
+                Some(SetOptions {
+                    expires: true,
+                    ttl: time::Duration::from_secs(1),
+                }),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // test replacing items in the database
+        db.update(|tx| {
+            tx.set("item1".to_string(), "nvalue1".to_string(), None)?;
+            tx.set("item2".to_string(), "nvalue2".to_string(), None)?;
+            tx.delete("item3".to_string())?;
+            Ok(())
+        })
+        .unwrap();
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_insert_does_not_misuse_index() {
+        let mut db = test_open();
+
+        // Only one item is eligible for the index, so no comparison is necessary.
+        fn fail(a: &str, b: &str) -> bool {
+            unreachable!()
+        }
+
+        db.create_index("some".to_string(), "a*".to_string(), vec![Arc::new(fail)])
+            .unwrap();
+        db.update(|tx| {
+            tx.set("a".to_string(), "1".to_string(), None)?;
+            tx.set("b".to_string(), "1".to_string(), None)?;
+            Ok(())
+        })
+        .unwrap();
+
+        db.update(|tx| {
+            tx.set("b".to_string(), "2".to_string(), None)?;
+            Ok(())
+        })
+        .unwrap();
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_delete_does_not_misuse_index() {
+        let mut db = test_open();
+
+        // Only one item is eligible for the index, so no comparison is necessary.
+        fn fail(a: &str, b: &str) -> bool {
+            unreachable!()
+        }
+
+        db.create_index("some".to_string(), "a*".to_string(), vec![Arc::new(fail)])
+            .unwrap();
+        db.update(|tx| {
+            tx.set("a".to_string(), "1".to_string(), None)?;
+            tx.set("b".to_string(), "1".to_string(), None)?;
+            Ok(())
+        })
+        .unwrap();
+
+        db.update(|tx| {
+            tx.delete("b".to_string())?;
+            Ok(())
+        })
+        .unwrap();
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_index_compare() {
+        assert!(index_float("1.5", "1.6"));
+        assert!(index_int("-1", "2"));
+        assert!(index_uint("10", "25"));
+        assert!(index_string_case_sensitive("Hello", "hello"));
+        assert!(!index_string("hello", "hello"));
+        assert!(!index_string("Hello", "hello"));
+        assert!(!index_string("hello", "Hello"));
+        assert!(index_string("gello", "Hello"));
+        assert!(!index_string("Hello", "gello"));
+        // TODO:
+        // rect, point
+    }
+
+    #[test]
+    fn test_opening_a_folder() {
+        let _ = std::fs::remove_dir_all("dir.tmp");
+        std::fs::create_dir("dir.tmp").unwrap();
+
+        assert!(Db::open("dir.tmp").is_err());
+
+        std::fs::remove_dir_all("dir.tmp").unwrap();
     }
 }
