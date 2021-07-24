@@ -20,6 +20,7 @@ use std::sync::RwLock;
 use std::time;
 
 type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
+type LessFn = Arc<dyn Fn(&str, &str) -> bool>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DbError {
@@ -418,7 +419,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
+        less: Vec<LessFn>,
     ) -> Result<(), DbError> {
         self.update(move |tx| tx.create_index(name, pattern, less))
     }
@@ -431,7 +432,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
+        less: Vec<LessFn>,
     ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
@@ -740,7 +741,7 @@ struct Index {
     pattern: String,
 
     /// less comparison function
-    less: Option<Arc<dyn Fn(&str, &str) -> bool>>,
+    less: Option<LessFn>,
 
     /// rect from string function
     rect: Option<RectFn>,
@@ -1016,7 +1017,7 @@ impl<'db> Tx<'db> {
         // now reset the live database trees
         let old_keys = std::mem::replace(&mut db.keys, BTreeC::new(Box::new(keys_compare_fn)));
         let old_exps = std::mem::replace(&mut db.exps, BTreeC::new(Box::new(exps_compare_fn)));
-        let old_idxs = std::mem::replace(&mut db.idxs, HashMap::new());
+        let old_idxs = std::mem::take(&mut db.idxs);
 
         // check to see if we've already deleted everything
         if wc.rbkeys.is_none() {
@@ -1058,7 +1059,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        lessers: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
+        lessers: Vec<LessFn>,
         rect: Option<RectFn>,
         opts: Option<IndexOptions>,
     ) -> Result<(), DbError> {
@@ -1158,7 +1159,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
+        less: Vec<LessFn>,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, None)
     }
@@ -1170,7 +1171,7 @@ impl<'db> Tx<'db> {
         name: String,
         pattern: String,
         opts: IndexOptions,
-        less: Vec<Arc<dyn Fn(&str, &str) -> bool>>,
+        less: Vec<LessFn>,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, Some(opts))
     }
@@ -1235,11 +1236,11 @@ impl<'db> Tx<'db> {
         let idx = db.idxs.remove(&name).unwrap();
         if wc.rbkeys.is_none() {
             // store the index in the rollback map.
-            if !wc.rollback_indexes.contains_key(&name) {
-                // we use a non-nil copy of the index without the data to indicate
-                // that the index should be rebuilt upon rollback.
-                wc.rollback_indexes.insert(name, Some(idx.clear_copy()));
-            }
+            // we use a non-nil copy of the index without the data to indicate
+            // that the index should be rebuilt upon rollback.
+            wc.rollback_indexes
+                .entry(name)
+                .or_insert_with(|| Some(idx.clear_copy()));
         }
 
         Ok(())
@@ -1348,7 +1349,6 @@ impl<'db> Tx<'db> {
             let sync_policy = db.config.sync_policy.clone();
 
             if let Err(e) = db.file.as_mut().unwrap().write_all(&db.buf) {
-                drop(db);
                 self.rollback_inner();
                 // TODO: return error
             }
@@ -1393,7 +1393,7 @@ impl<'db> Tx<'db> {
     // doing ad-hoc compares inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no less
     // function bound to the index
-    fn get_less(&self, index: String) -> Result<Arc<dyn Fn(&str, &str) -> bool>, DbError> {
+    fn get_less(&self, index: String) -> Result<LessFn, DbError> {
         if self.db.is_none() {
             return Err(DbError::TxClosed);
         }
@@ -1549,11 +1549,9 @@ impl<'db> Tx<'db> {
         }
         let item = maybe_item.unwrap();
         // create a rollback entry if there has not been a deleteAll call
-        if wc.rbkeys.is_none() {
-            if !wc.rollback_items.contains_key(&key) {
-                wc.rollback_items
-                    .insert(key.to_string(), Some(item.clone()));
-            }
+        if wc.rbkeys.is_none() && !wc.rollback_items.contains_key(&key) {
+            wc.rollback_items
+                .insert(key.to_string(), Some(item.clone()));
         }
         if db.persist {
             wc.commit_items.insert(key, None);
@@ -1606,10 +1604,11 @@ impl<'db> Tx<'db> {
         let db = self.db.as_ref().unwrap();
         let mut tr;
 
-        if index == "" {
+        if index.is_empty() {
             // empty index means we will use the keys tree
             tr = &db.keys;
         } else {
+            #[allow(clippy::collapsible_else_if)]
             if let Some(idx) = db.idxs.get(index) {
                 if let Some(btr) = &idx.btr {
                     eprintln!("using index {}", btr.count());
@@ -1627,7 +1626,8 @@ impl<'db> Tx<'db> {
         let mut item_b = None;
 
         if gt || lt {
-            if index == "" {
+            #[allow(clippy::collapsible_else_if)]
+            if index.is_empty() {
                 item_a = Some(DbItem {
                     key: start.to_string(),
                     ..Default::default()
@@ -1658,35 +1658,32 @@ impl<'db> Tx<'db> {
 
         eprintln!("desc {} gt {} lt {}", desc, gt, lt);
 
+        #[allow(clippy::collapsible_else_if)]
         if desc {
-            if gt {
-                if lt {
-                    btree_descend_range(
-                        tr,
-                        item_a.as_ref().unwrap(),
-                        item_b.as_ref().unwrap(),
-                        iterator,
-                    );
-                } else {
-                    btree_descend_greater_than(tr, item_a.as_ref().unwrap(), iterator);
-                }
+            if gt && lt {
+                btree_descend_range(
+                    tr,
+                    item_a.as_ref().unwrap(),
+                    item_b.as_ref().unwrap(),
+                    iterator,
+                );
+            } else if gt {
+                btree_descend_greater_than(tr, item_a.as_ref().unwrap(), iterator);
             } else if lt {
                 btree_descend_less_or_equal(tr, item_a, iterator);
             } else {
                 btree_descend(tr, iterator);
             }
         } else {
-            if gt {
-                if lt {
-                    btree_ascend_range(
-                        tr,
-                        item_a.as_ref().unwrap(),
-                        item_b.as_ref().unwrap(),
-                        iterator,
-                    );
-                } else {
-                    btree_ascend_greater_or_equal(tr, item_a, iterator);
-                }
+            if gt && lt {
+                btree_ascend_range(
+                    tr,
+                    item_a.as_ref().unwrap(),
+                    item_b.as_ref().unwrap(),
+                    iterator,
+                );
+            } else if gt {
+                btree_ascend_greater_or_equal(tr, item_a, iterator);
             } else if lt {
                 btree_ascend_less_than(tr, item_a.as_ref().unwrap(), iterator);
             } else {
@@ -2109,14 +2106,16 @@ fn index_string(a: &str, b: &str) -> bool {
                 // both are upper case, do nothing
                 if a_chars[i] < b_chars[i] {
                     return true;
-                } else if a_chars[i] > b_chars[i] {
+                }
+                if a_chars[i] > b_chars[i] {
                     return true;
                 }
             } else {
                 // a is uppercase, convert to lowercase
                 if a_chars[i].to_ascii_lowercase() < b_chars[i] {
                     return true;
-                } else if a_chars[i].to_ascii_lowercase() > b_chars[i] {
+                }
+                if a_chars[i].to_ascii_lowercase() > b_chars[i] {
                     return true;
                 }
             }
@@ -2124,14 +2123,16 @@ fn index_string(a: &str, b: &str) -> bool {
             // a is uppercase, convert to lowercase
             if a_chars[i] < b_chars[i].to_ascii_lowercase() {
                 return true;
-            } else if a_chars[i] > b_chars[i].to_ascii_lowercase() {
+            }
+            if a_chars[i] > b_chars[i].to_ascii_lowercase() {
                 return true;
             }
         } else {
             // neither are uppercase
             if a_chars[i] < b_chars[i] {
                 return true;
-            } else if a_chars[i] > b_chars[i] {
+            }
+            if a_chars[i] > b_chars[i] {
                 return false;
             }
         }
@@ -2349,17 +2350,17 @@ mod tests {
         db.view(|tx| {
             tx.ascend("".to_string(), |key, val| {
                 res.push_str(key);
-                res.push_str(":");
+                res.push(':');
                 res.push_str(val);
-                res.push_str("\n");
+                res.push('\n');
                 true
             })
             .unwrap();
             tx.ascend("all".to_string(), |key, val| {
                 res2.push_str(key);
-                res2.push_str(":");
+                res2.push(':');
                 res2.push_str(val);
-                res2.push_str("\n");
+                res2.push('\n');
                 true
             })
             .unwrap();
@@ -2380,17 +2381,17 @@ mod tests {
         db.view(|tx| {
             tx.ascend("".to_string(), |key, val| {
                 res.push_str(key);
-                res.push_str(":");
+                res.push(':');
                 res.push_str(val);
-                res.push_str("\n");
+                res.push('\n');
                 true
             })
             .unwrap();
             tx.ascend("all".to_string(), |key, val| {
                 res2.push_str(key);
-                res2.push_str(":");
+                res2.push(':');
                 res2.push_str(val);
-                res2.push_str("\n");
+                res2.push('\n');
                 true
             })
             .unwrap();
