@@ -682,8 +682,11 @@ impl Db {
     }
 
     /// get return an item or nil if not found.
-    pub fn get(&self, key: String) -> Option<DbItem> {
-        todo!()
+    pub fn get(&self, key: String) -> Option<&DbItem> {
+        self.keys.get(DbItem {
+            key,
+            ..Default::default()
+        })
     }
 
     // Begin opens a new transaction.
@@ -927,7 +930,8 @@ impl DbItem {
     fn write_set_to(&self, buf: &mut Vec<u8>) {
         if let Some(opts) = &self.opts {
             if opts.ex {
-                let ex = (opts.exat - time::Instant::now()).as_secs();
+                let now = time::Instant::now();
+                let ex = opts.exat.saturating_duration_since(now).as_secs();
                 append_array(buf, 5);
                 append_bulk_string(buf, "set");
                 append_bulk_string(buf, &self.key);
@@ -1519,7 +1523,7 @@ impl<'db> Tx<'db> {
                     // the caller is only interested in items that have not expired.
                     return Err(DbError::NotFound);
                 }
-                Ok(item.val)
+                Ok(item.val.to_string())
             }
         }
     }
@@ -2569,6 +2573,55 @@ mod tests {
         })
         .unwrap();
 
+        // test non-managed transactions
+        let mut tx = db.begin(true).unwrap();
+        tx.set("howdy".to_string(), "world".to_string(), None);
+        tx.commit().unwrap();
+
+        let mut tx1 = db.begin(false).unwrap();
+        let v = tx1.get("howdy".to_string(), false).unwrap();
+        assert_eq!(v, "world");
+        tx1.rollback().unwrap();
+
+        let mut tx2 = db.begin(true).unwrap();
+        let v = tx2.get("howdy".to_string(), false).unwrap();
+        assert_eq!(v, "world");
+        tx2.delete("howdy".to_string()).unwrap();
+        tx2.commit();
+
+        // test fo closed transactions
+        let err = db
+            .update(|tx| {
+                tx.db = None;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(err, DbError::TxClosed);
+        // TODO:
+        // db.unlock();
+
+        // test for invalid writes
+
         test_close(db);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_panic_during_commit_in_managed_tx() {
+        let mut db = Db::open(":memory:").unwrap();
+        db.update(|tx| {
+            tx.commit();
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_panic_during_rollback_in_managed_tx() {
+        let mut db = Db::open(":memory:").unwrap();
+        db.update(|tx| {
+            tx.rollback();
+            Ok(())
+        });
     }
 }
