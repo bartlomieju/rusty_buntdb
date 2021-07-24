@@ -1749,15 +1749,13 @@ impl<'db> Tx<'db> {
             return Ok(());
         }
 
-        if pattern.chars().nth(0).unwrap() == '*' {
+        if pattern.starts_with('*') {
             if pattern == "*" {
                 return self.ascend("".to_string(), iterator);
             }
             return self.ascend("".to_string(), |k, v| {
-                if matcher::matches(k, pattern) {
-                    if !iterator(k, v) {
-                        return false;
-                    }
+                if matcher::matches(k, pattern) && !iterator(k, v) {
+                    return false;
                 }
                 true
             });
@@ -1768,10 +1766,8 @@ impl<'db> Tx<'db> {
             if k > &max {
                 return false;
             }
-            if matcher::matches(k, pattern) {
-                if !iterator(k, v) {
-                    return false;
-                }
+            if matcher::matches(k, pattern) && !iterator(k, v) {
+                return false;
             }
             true
         })
@@ -1786,15 +1782,13 @@ impl<'db> Tx<'db> {
             return Ok(());
         }
 
-        if pattern.chars().nth(0).unwrap() == '*' {
+        if pattern.starts_with('*') {
             if pattern == "*" {
                 return self.descend("", iterator);
             }
             return self.descend("", |k, v| {
-                if matcher::matches(k, pattern) {
-                    if !iterator(k, v) {
-                        return false;
-                    }
+                if matcher::matches(k, pattern) && !iterator(k, v) {
+                    return false;
                 }
                 true
             });
@@ -1805,10 +1799,8 @@ impl<'db> Tx<'db> {
             if k < &max {
                 return false;
             }
-            if matcher::matches(k, pattern) {
-                if !iterator(k, v) {
-                    return false;
-                }
+            if matcher::matches(k, pattern) && !iterator(k, v) {
+                return false;
             }
             true
         })

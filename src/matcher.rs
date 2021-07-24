@@ -4,10 +4,10 @@
 /// pattern:
 ///   { term }
 /// term:
-/// 	 '*'         matches any sequence of non-Separator characters
-/// 	 '?'         matches any single non-Separator character
-/// 	 c           matches character c (c != '*', '?')
-/// 	'\\' c       matches character c
+///      '*'         matches any sequence of non-Separator characters
+///      '?'         matches any single non-Separator character
+///      c           matches character c (c != '*', '?')
+///     '\\' c       matches character c
 pub fn matches(pattern: &str, candidate: &str) -> bool {
     let mut plen = pattern.len();
     let mut slen = candidate.len();
@@ -66,7 +66,7 @@ pub fn matches(pattern: &str, candidate: &str) -> bool {
 
 pub fn allowable(pattern: &str) -> (String, String) {
     assert!(!pattern.is_empty());
-    assert_ne!(pattern.chars().nth(0).unwrap(), '*');
+    assert_ne!(pattern.chars().next().unwrap(), '*');
 
     let min = String::new();
     let max = String::new();
