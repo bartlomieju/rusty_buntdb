@@ -71,6 +71,8 @@ pub fn allowable(pattern: &str) -> (String, String) {
     let min = String::new();
     let max = String::new();
 
+    todo!();
+
     (min, max)
 }
 
