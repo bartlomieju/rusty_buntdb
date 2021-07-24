@@ -133,7 +133,7 @@ pub struct Db {
 }
 
 /// SyncPolicy represents how often data is synced to disk.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SyncPolicy {
     /// Never is used to disable syncing data to disk.
     /// The faster and less safe method.
@@ -275,7 +275,7 @@ impl Db {
 
     /// `close` releases all database resources.
     /// All transactions must be closed before closing the database.
-    pub fn close(mut self) -> Result<(), DbError> {
+    pub fn close(&mut self) -> Result<(), DbError> {
         self.mu.lock_exclusive();
 
         if self.closed {
@@ -2188,14 +2188,14 @@ mod tests {
     }
 
     fn test_reopen_delay(maybe_db: Option<Db>, duration: time::Duration) -> Db {
-        if let Some(db) = maybe_db {
+        if let Some(mut db) = maybe_db {
             db.close().unwrap();
         }
         std::thread::sleep(duration);
         Db::open("data.db").unwrap()
     }
 
-    fn test_close(db: Db) {
+    fn test_close(mut db: Db) {
         let _ = db.close();
         // let _ = std::fs::remove_file("data.db");
     }
@@ -2848,5 +2848,54 @@ mod tests {
         assert!(Db::open("dir.tmp").is_err());
 
         std::fs::remove_dir_all("dir.tmp").unwrap();
+    }
+
+    #[test]
+    fn test_opening_a_closed_database() {
+        let _ = std::fs::remove_file("data.db");
+
+        let mut db = Db::open("data.db").unwrap();
+        db.close().unwrap();
+        let err = db.close().unwrap_err();
+        assert_eq!(err, DbError::DatabaseClosed);
+
+        let mut db = Db::open(":memory:").unwrap();
+        db.close().unwrap();
+        let err = db.close().unwrap_err();
+        assert_eq!(err, DbError::DatabaseClosed);
+
+        let _ = std::fs::remove_file("data.db");
+    }
+
+    #[test]
+    fn test_config() {
+        let mut db = test_open();
+
+        db.set_config(Config {
+            sync_policy: SyncPolicy::Never,
+            ..Default::default()
+        })
+        .unwrap();
+
+        db.set_config(Config {
+            sync_policy: SyncPolicy::EverySecond,
+            ..Default::default()
+        })
+        .unwrap();
+
+        db.set_config(Config {
+            auto_shrink_min_size: 100,
+            auto_shrink_percentage: 200,
+            sync_policy: SyncPolicy::Always,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let config = db.read_config().unwrap();
+        assert_eq!(config.auto_shrink_min_size, 100);
+        assert_eq!(config.auto_shrink_percentage, 200);
+        assert_eq!(config.sync_policy, SyncPolicy::Always);
+
+        test_close(db);
     }
 }
