@@ -2348,6 +2348,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_delete_all() {
         let mut db = test_open();
 
