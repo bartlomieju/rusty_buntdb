@@ -2138,7 +2138,6 @@ where
 fn index_int(a: &str, b: &str) -> bool {
     let ia = a.parse::<i32>().unwrap();
     let ib = b.parse::<i32>().unwrap();
-    eprintln!("index_int a: {} b: {}", ia, ib);
     ia < ib
 }
 
@@ -2146,19 +2145,11 @@ fn index_int(a: &str, b: &str) -> bool {
 // This is a case-insensitive comparison. Use the IndexBinary() for comparing
 // case-sensitive strings.
 fn index_string(a: &str, b: &str) -> bool {
-    if a.to_lowercase().cmp(&b.to_lowercase()) == Ordering::Less {
-        true
-    } else {
-        false
-    }
+    a.to_lowercase().cmp(&b.to_lowercase()) == Ordering::Less
 }
 
 fn index_string_case_sensitive(a: &str, b: &str) -> bool {
-    if a.cmp(&b) == Ordering::Less {
-        true
-    } else {
-        false
-    }
+    a.cmp(&b) == Ordering::Less
 }
 
 #[cfg(test)]
