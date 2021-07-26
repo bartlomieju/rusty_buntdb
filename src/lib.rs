@@ -627,6 +627,98 @@ impl Db {
         maybe_prev
     }
 
+    fn background_manager_inner(&mut self) {
+        let mut flushes = 0;
+        let mut shrink = false;
+        let mut expired = vec![];
+        let mut on_expired = None;
+        let mut on_expired_sync = None;
+
+        // Open a standard view. This will take a full lock of the
+        // database thus allowing for access to anything we need.
+        let update_result = self.update(|tx| {
+            let db = tx.db.as_ref().unwrap();
+            on_expired = db.config.on_expired;
+
+            if on_expired.is_none() {
+                on_expired_sync = db.config.on_expired_sync;
+            }
+
+            if db.persist && !db.config.auto_shrink_disabled {
+                // TODO:
+            }
+
+            // produce a list of expired items that need removing
+            let key_item = DbItem {
+                opts: Some(DbItemOpts {
+                    ex: true,
+                    exat: time::Instant::now(),
+                }),
+                ..Default::default()
+            };
+            btree_ascend_less_than(&db.exps, &key_item, |k, v| {
+                expired.push((k.to_string(), v.to_string()));
+                true
+            });
+            if on_expired.is_none() && on_expired_sync.is_none() {
+                for (key, value) in &expired {
+                    if let Err(err) = tx.delete(key.to_string()) {
+                        // it's ok to get a "not found" because the
+                        // 'Delete' method reports "not found" for
+                        // expired items.
+                        if err != DbError::NotFound {
+                            return Err(err);
+                        }
+                    }
+                }
+            } else if let Some(on_expired_sync_) = on_expired_sync {
+                for (key, value) in &expired {
+                    if let Err(err) = on_expired_sync_(key.to_string(), value.to_string(), tx) {
+                        return Err(err);
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        if let Err(err) = update_result {
+            if err == DbError::DatabaseClosed {
+                // TODO:
+                // break;
+            }
+        }
+
+        // send expired event, if needed
+        if !expired.is_empty() {
+            if let Some(on_expired_) = on_expired {
+                let expired_keys = expired.into_iter().map(|(k, _)| k).collect();
+                on_expired_(expired_keys);
+            }
+        }
+
+        // execute a disk synk, if needed
+        {
+            self.mu.lock_exclusive();
+            if self.persist
+                && self.config.sync_policy == SyncPolicy::EverySecond
+                && flushes != self.flushes
+            {
+                let _ = self.file.as_mut().unwrap().sync_all();
+                flushes = self.flushes;
+            }
+            unsafe { self.mu.unlock_exclusive() };
+        }
+
+        if shrink {
+            if let Err(err) = self.shrink() {
+                if err == DbError::DatabaseClosed {
+                    // TODO:
+                    // break;
+                }
+            }
+        }
+    }
+
     /// backgroundManager runs continuously in the background and performs various
     /// operations such as removing expired items and syncing to disk.
     fn background_manager() {
@@ -635,7 +727,7 @@ impl Db {
 
     /// Shrink will make the database file smaller by removing redundant
     /// log entries. This operation does not block the database.
-    fn shrink() {
+    fn shrink(&mut self) -> Result<(), DbError> {
         todo!()
     }
 
