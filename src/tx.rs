@@ -905,7 +905,12 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    pub fn ascend_less_than<F>(&mut self, index: &str, pivot: &str, iterator: F) -> Result<(), DbError>
+    pub fn ascend_less_than<F>(
+        &mut self,
+        index: &str,
+        pivot: &str,
+        iterator: F,
+    ) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -1021,7 +1026,12 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    pub fn ascend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
+    pub fn ascend_equal<F>(
+        &mut self,
+        index: &str,
+        pivot: &str,
+        mut iterator: F,
+    ) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -1056,7 +1066,12 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    pub fn descend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
+    pub fn descend_equal<F>(
+        &mut self,
+        index: &str,
+        pivot: &str,
+        mut iterator: F,
+    ) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -1103,7 +1118,12 @@ impl<'db> Tx<'db> {
     // is represented by the rect string. This string will be processed by the
     // same bounds function that was passed to the CreateSpatialIndex() function.
     // An invalid index will return an error.
-    pub fn intersects<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
+    pub fn intersects<F>(
+        &mut self,
+        index: String,
+        bounds: String,
+        iterator: F,
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
