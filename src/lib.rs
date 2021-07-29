@@ -25,6 +25,11 @@ mod tx;
 use tx::*;
 mod index;
 use index::*;
+mod item;
+use item::DbItem;
+use item::DbItemOpts;
+mod btree_helpers;
+use btree_helpers::btree_ascend_less_than;
 
 type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
 type LessFn = Arc<dyn Fn(&str, &str) -> bool>;
@@ -844,98 +849,6 @@ impl Db {
     }
 }
 
-/// DbItemOpts holds various meta information about an item.
-#[derive(Clone, Eq, PartialEq)]
-pub struct DbItemOpts {
-    /// does this item expire?
-    ex: bool,
-    /// when does this item expire?
-    exat: time::Instant,
-}
-
-#[derive(Clone, Default, Eq, PartialEq)]
-pub struct DbItem {
-    // the binary key
-    key: String,
-    // the binary value
-    val: String,
-    // optional meta information
-    opts: Option<DbItemOpts>,
-    // keyless item for scanning
-    keyless: bool,
-}
-
-// This is a long time in the future. It's an imaginary number that is
-// used for b-tree ordering.
-static MAX_TIME: OnceCell<time::Instant> = OnceCell::new();
-
-fn get_max_time() -> time::Instant {
-    *MAX_TIME.get_or_init(|| time::Instant::now() + time::Duration::MAX)
-}
-
-impl DbItem {
-    // expired evaluates id the item has expired. This will always return false when
-    // the item does not have `opts.ex` set to true.
-    fn expired(&self) -> bool {
-        if let Some(opts) = &self.opts {
-            return opts.ex && opts.exat < time::Instant::now();
-        }
-
-        false
-    }
-
-    // expiresAt will return the time when the item will expire. When an item does
-    // not expire `maxTime` is used.
-    fn expires_at(&self) -> time::Instant {
-        if let Some(opts) = &self.opts {
-            if !opts.ex {
-                return get_max_time();
-            }
-
-            return opts.exat;
-        }
-
-        get_max_time()
-    }
-
-    // writeSetTo writes an item as a single SET record to the a bufio Writer.
-    fn write_set_to(&self, buf: &mut Vec<u8>) {
-        if let Some(opts) = &self.opts {
-            if opts.ex {
-                let now = time::Instant::now();
-                let ex = opts.exat.saturating_duration_since(now).as_secs();
-                append_array(buf, 5);
-                append_bulk_string(buf, "set");
-                append_bulk_string(buf, &self.key);
-                append_bulk_string(buf, &self.val);
-                append_bulk_string(buf, "ex");
-                append_bulk_string(buf, &format!("{}", ex));
-                return;
-            }
-        }
-
-        append_array(buf, 3);
-        append_bulk_string(buf, "set");
-        append_bulk_string(buf, &self.key);
-        append_bulk_string(buf, &self.val);
-    }
-
-    // writeDeleteTo deletes an item as a single DEL record to the a bufio Writer.
-    fn write_delete_to(&self, buf: &mut Vec<u8>) {
-        append_array(buf, 2);
-        append_bulk_string(buf, "del");
-        append_bulk_string(buf, &self.key);
-    }
-}
-
-fn append_array(buf: &mut Vec<u8>, count: i64) {
-    buf.extend(format!("*{}\r\n", count).as_bytes());
-}
-
-fn append_bulk_string(buf: &mut Vec<u8>, s: &str) {
-    buf.extend(format!("${}\r\n{}\r\n", s.len(), s).as_bytes());
-}
-
 // SetOptions represents options that may be included with the Set() command.
 struct SetOptions {
     // Expires indicates that the Set() key-value will expire
@@ -950,107 +863,6 @@ struct SetOptions {
 struct Rect {
     min: Vec<f64>,
     max: Vec<f64>,
-}
-
-fn btree_lt(tree: &BTreeC<DbItem>, a: &DbItem, b: &DbItem) -> bool {
-    tree.less(a, b)
-}
-
-fn btree_gt(tree: &BTreeC<DbItem>, a: &DbItem, b: &DbItem) -> bool {
-    tree.less(b, a)
-}
-
-// Ascend helpers
-
-fn btree_ascend<F>(tree: &BTreeC<DbItem>, mut iterator: F)
-where
-    F: FnMut(&str, &str) -> bool,
-{
-    tree.ascend(None, |item| iterator(&item.key, &item.val));
-}
-
-fn btree_ascend_less_than<F>(tree: &BTreeC<DbItem>, pivot: &DbItem, mut iterator: F)
-where
-    F: FnMut(&str, &str) -> bool,
-{
-    tree.ascend(None, |item| {
-        btree_lt(tree, item, pivot) && iterator(&item.key, &item.val)
-    });
-}
-
-fn btree_ascend_greater_or_equal<F>(tree: &BTreeC<DbItem>, pivot: Option<DbItem>, mut iterator: F)
-where
-    F: FnMut(&str, &str) -> bool,
-{
-    eprintln!(
-        "ascent greater or equal pivot, key: {} val: {}",
-        pivot.as_ref().unwrap().key,
-        pivot.as_ref().unwrap().val
-    );
-    tree.ascend(pivot, |item| {
-        eprintln!("tree ascend key: {} val: {}", item.key, item.val);
-        iterator(&item.key, &item.val)
-    });
-    eprintln!("called tree ascend");
-}
-
-fn btree_ascend_range<F>(
-    tree: &BTreeC<DbItem>,
-    greater_or_equal: &DbItem,
-    less_than: &DbItem,
-    mut iterator: F,
-) where
-    F: FnMut(&str, &str) -> bool,
-{
-    tree.ascend(Some(greater_or_equal.clone()), |item| {
-        btree_lt(tree, item, less_than) && iterator(&item.key, &item.val)
-    });
-}
-
-// Descend helpers
-
-fn btree_descend<F>(tree: &BTreeC<DbItem>, mut iterator: F)
-where
-    F: FnMut(&str, &str) -> bool,
-{
-    tree.descend(None, |item| iterator(&item.key, &item.val));
-}
-
-fn btree_descend_greater_than<F>(tree: &BTreeC<DbItem>, pivot: &DbItem, mut iterator: F)
-where
-    F: FnMut(&str, &str) -> bool,
-{
-    tree.descend(None, |item| {
-        btree_gt(tree, item, pivot) && iterator(&item.key, &item.val)
-    });
-}
-
-fn btree_descend_range<F>(
-    tree: &BTreeC<DbItem>,
-    less_or_equal: &DbItem,
-    greater_than: &DbItem,
-    mut iterator: F,
-) where
-    F: FnMut(&str, &str) -> bool,
-{
-    tree.descend(Some(less_or_equal.clone()), |item| {
-        btree_gt(tree, item, greater_than) && iterator(&item.key, &item.val)
-    });
-}
-
-fn btree_descend_less_or_equal<F>(tree: &BTreeC<DbItem>, pivot: Option<DbItem>, mut iterator: F)
-where
-    F: FnMut(&str, &str) -> bool,
-{
-    eprintln!(
-        "descent less or equal pivot, key: {} val: {}",
-        pivot.as_ref().unwrap().key,
-        pivot.as_ref().unwrap().val
-    );
-    tree.descend(pivot, |item| {
-        eprintln!("called!");
-        iterator(&item.key, &item.val)
-    });
 }
 
 // index_int is a helper function that returns true if 'a` is less than 'b'
