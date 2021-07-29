@@ -627,8 +627,8 @@ impl Db {
         maybe_prev
     }
 
-    fn background_manager_inner(&mut self) {
-        let mut flushes = 0;
+    // Returns true if database has been closed.
+    fn background_manager_inner(&mut self, mut flushes: i64) -> bool {
         let mut shrink = false;
         let mut expired = vec![];
         let mut on_expired = None;
@@ -683,8 +683,7 @@ impl Db {
 
         if let Err(err) = update_result {
             if err == DbError::DatabaseClosed {
-                // TODO:
-                // break;
+                return true;
             }
         }
 
@@ -712,17 +711,31 @@ impl Db {
         if shrink {
             if let Err(err) = self.shrink() {
                 if err == DbError::DatabaseClosed {
-                    // TODO:
-                    // break;
+                    return true;
                 }
             }
         }
+
+        false
     }
 
     /// backgroundManager runs continuously in the background and performs various
     /// operations such as removing expired items and syncing to disk.
-    fn background_manager() {
-        todo!()
+    fn background_manager(&mut self) -> std::thread::JoinHandle<()> {
+        todo!();
+
+        // std::thread::spawn(move || {
+        //     let mut flushes = 0;
+        //     loop {
+        //         // FIXME: this is naive, we'll be sleeping 1s between `background_manager_inner`
+        //         // calls, instead of calling `background_manager_inner` every second
+        //         std::thread::sleep(time::Duration::from_secs(1));
+
+        //         if self.background_manager_inner(flushes) {
+        //             break;
+        //         }
+        //     }
+        // })
     }
 
     /// Shrink will make the database file smaller by removing redundant
