@@ -42,7 +42,7 @@ pub struct Tx<'db> {
     /// are we currently holding DB lock?
     has_lock: bool,
     /// when false mutable operations fail.
-    writable: bool,
+    pub(crate) writable: bool,
     /// when true Commit and Rollback panic.
     funcd: bool,
     /// context for writable transactions.
@@ -105,7 +105,7 @@ impl<'db> Tx<'db> {
     }
 
     // DeleteAll deletes all items from the database.
-    fn delete_all(&mut self) -> Result<(), DbError> {
+    pub fn delete_all(&mut self) -> Result<(), DbError> {
         if self.db.is_none() {
             return Err(DbError::TxClosed);
         } else if !self.writable {
@@ -561,7 +561,7 @@ impl<'db> Tx<'db> {
     //
     // Only a writable transaction can be used with this operation.
     // This operation is not allowed during iterations such as Ascend* & Descend*.
-    fn set(
+    pub fn set(
         &mut self,
         key: String,
         val: String,
@@ -639,7 +639,7 @@ impl<'db> Tx<'db> {
     // Get returns a value for a key. If the item does not exist or if the item
     // has expired then ErrNotFound is returned. If ignoreExpired is true, then
     // the found value will be returned even if it is expired.
-    fn get(&mut self, key: String, ignore_expired: bool) -> Result<String, DbError> {
+    pub fn get(&mut self, key: String, ignore_expired: bool) -> Result<String, DbError> {
         if self.db.is_none() {
             return Err(DbError::TxClosed);
         }
@@ -703,7 +703,7 @@ impl<'db> Tx<'db> {
     // TTL returns the remaining time-to-live for an item.
     // A negative duration will be returned for items that do not have an
     // expiration.
-    fn ttl(&mut self, key: String) -> Result<Option<time::Duration>, DbError> {
+    pub fn ttl(&mut self, key: String) -> Result<Option<time::Duration>, DbError> {
         if self.db.is_none() {
             return Err(DbError::TxClosed);
         }
@@ -853,7 +853,7 @@ impl<'db> Tx<'db> {
     }
 
     // AscendKeys allows for iterating through keys based on the specified pattern.
-    fn ascend_keys<F>(&mut self, pattern: &str, iterator: F) -> Result<(), DbError>
+    pub fn ascend_keys<F>(&mut self, pattern: &str, iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -861,7 +861,7 @@ impl<'db> Tx<'db> {
     }
 
     // DescendKeys allows for iterating through keys based on the specified pattern.
-    fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DbError>
+    pub fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -874,7 +874,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), DbError>
+    pub fn ascend<F>(&mut self, index: String, iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -887,7 +887,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_greater_or_equal<F>(
+    pub fn ascend_greater_or_equal<F>(
         &mut self,
         index: &str,
         pivot: &str,
@@ -905,7 +905,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_less_than<F>(&mut self, index: &str, pivot: &str, iterator: F) -> Result<(), DbError>
+    pub fn ascend_less_than<F>(&mut self, index: &str, pivot: &str, iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -918,7 +918,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_range<F>(
+    pub fn ascend_range<F>(
         &mut self,
         index: &str,
         greater_or_equal: &str,
@@ -945,7 +945,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend<F>(&mut self, index: &str, iterator: F) -> Result<(), DbError>
+    pub fn descend<F>(&mut self, index: &str, iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -958,7 +958,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend_greater_than<F>(
+    pub fn descend_greater_than<F>(
         &mut self,
         index: &str,
         pivot: &str,
@@ -976,7 +976,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend_less_or_equal<F>(
+    pub fn descend_less_or_equal<F>(
         &mut self,
         index: &str,
         pivot: &str,
@@ -994,7 +994,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend_range<F>(
+    pub fn descend_range<F>(
         &mut self,
         index: &str,
         less_or_equal: &str,
@@ -1021,7 +1021,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn ascend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
+    pub fn ascend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -1056,7 +1056,7 @@ impl<'db> Tx<'db> {
     // as specified by the less() function of the defined index.
     // When an index is not provided, the results will be ordered by the item key.
     // An invalid index will return an error.
-    fn descend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
+    pub fn descend_equal<F>(&mut self, index: &str, pivot: &str, mut iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -1091,7 +1091,7 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     // The dist param is the distance of the bounding boxes. In the case of
     // simple 2D points, it's the distance of the two 2D points squared.
-    fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
+    pub fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String, f64) -> bool,
     {
@@ -1103,7 +1103,7 @@ impl<'db> Tx<'db> {
     // is represented by the rect string. This string will be processed by the
     // same bounds function that was passed to the CreateSpatialIndex() function.
     // An invalid index will return an error.
-    fn intersects<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
+    pub fn intersects<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1111,7 +1111,7 @@ impl<'db> Tx<'db> {
     }
 
     // Len returns the number of items in the database
-    fn len(&self) -> Result<u64, DbError> {
+    pub fn len(&self) -> Result<u64, DbError> {
         if self.db.is_none() {
             return Err(DbError::TxClosed);
         }

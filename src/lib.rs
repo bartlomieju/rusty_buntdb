@@ -826,7 +826,7 @@ impl Db {
 }
 
 // SetOptions represents options that may be included with the Set() command.
-struct SetOptions {
+pub struct SetOptions {
     // Expires indicates that the Set() key-value will expire
     expires: bool,
     // TTL is how much time the key-value will exist in the database
