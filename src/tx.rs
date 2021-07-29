@@ -16,13 +16,13 @@ use std::time;
 
 use crate::btree_helpers::*;
 use crate::exps_compare_fn;
+use crate::index::Index;
+use crate::index::IndexOptions;
 use crate::item::DbItem;
 use crate::item::DbItemOpts;
 use crate::keys_compare_fn;
 use crate::Db;
 use crate::DbError;
-use crate::Index;
-use crate::IndexOptions;
 use crate::LessFn;
 use crate::RectFn;
 use crate::SetOptions;
@@ -40,13 +40,13 @@ pub struct Tx<'db> {
     /// the underlying database.
     pub db: Option<&'db mut Db>,
     /// are we currently holding DB lock?
-    pub has_lock: bool,
+    has_lock: bool,
     /// when false mutable operations fail.
-    pub writable: bool,
+    writable: bool,
     /// when true Commit and Rollback panic.
-    pub funcd: bool,
+    funcd: bool,
     /// context for writable transactions.
-    pub wc: Option<TxWriteContext>,
+    wc: Option<TxWriteContext>,
 }
 
 #[derive(Default)]
@@ -71,6 +71,39 @@ pub struct TxWriteContext {
 }
 
 impl<'db> Tx<'db> {
+    pub fn new(db: &'db mut Db, writable: bool) -> Result<Self, DbError> {
+        let mut tx = Tx {
+            db: Some(db),
+            has_lock: false,
+            writable,
+            funcd: false,
+            wc: None,
+        };
+
+        tx.lock();
+
+        if tx.db.as_ref().unwrap().closed {
+            tx.unlock();
+            return Err(DbError::DatabaseClosed);
+        }
+
+        if writable {
+            tx.wc = Some(TxWriteContext::default());
+        }
+
+        Ok(tx)
+    }
+
+    pub fn with_managed<F, R>(&mut self, func: F) -> Result<R, DbError>
+    where
+        F: FnOnce(&mut Self) -> Result<R, DbError>,
+    {
+        self.funcd = true;
+        let func_result = func(self);
+        self.funcd = false;
+        func_result
+    }
+
     // DeleteAll deletes all items from the database.
     fn delete_all(&mut self) -> Result<(), DbError> {
         if self.db.is_none() {
@@ -186,14 +219,7 @@ impl<'db> Tx<'db> {
             pattern = pattern.to_lowercase();
         }
 
-        let mut idx = Index {
-            btr: None,
-            name,
-            pattern,
-            less,
-            rect,
-            opts: options,
-        };
+        let mut idx = Index::new(name, pattern, less, rect, options);
         idx.rebuild(db);
         // store the index in the rollback map.
         if wc.rbkeys.is_none() {

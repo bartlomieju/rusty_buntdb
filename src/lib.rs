@@ -205,9 +205,6 @@ pub struct Config {
     on_expired_sync: Option<OnExpiredSyncFn>,
 }
 
-// `ExCtx` is a simple b-tree context for ordering by expiration.
-struct ExCtx {}
-
 fn keys_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
     if a.keyless {
         return Ordering::Less;
@@ -761,9 +758,7 @@ impl Db {
         F: FnOnce(&mut Tx) -> Result<R, DbError>,
     {
         let mut tx = self.begin(writable)?;
-        tx.funcd = true;
-        let func_result = func(&mut tx);
-        tx.funcd = false;
+        let func_result = tx.with_managed(func);
         if let Err(err) = func_result {
             // The caller returned an error. We must rollback;
             let _ = tx.rollback();
@@ -826,26 +821,7 @@ impl Db {
     //
     // All transactions must be closed by calling Commit() or Rollback() when done.
     fn begin(&mut self, writable: bool) -> Result<Tx, DbError> {
-        let mut tx = Tx {
-            db: Some(self),
-            has_lock: false,
-            writable,
-            funcd: false,
-            wc: None,
-        };
-
-        tx.lock();
-
-        if tx.db.as_ref().unwrap().closed {
-            tx.unlock();
-            return Err(DbError::DatabaseClosed);
-        }
-
-        if writable {
-            tx.wc = Some(TxWriteContext::default());
-        }
-
-        Ok(tx)
+        Tx::new(self, writable)
     }
 }
 

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time;
 
+use crate::item::DbItem;
 use crate::Db;
-use crate::DbItem;
 use crate::LessFn;
 use crate::RectFn;
 
@@ -41,7 +41,7 @@ pub struct Index {
     pub name: String,
 
     /// a required key pattern
-    pub pattern: String,
+    pattern: String,
 
     /// less comparison function
     pub less: Option<LessFn>,
@@ -49,14 +49,28 @@ pub struct Index {
     /// rect from string function
     pub rect: Option<RectFn>,
 
-    /// the origin database
-    // db: Arc<Db>,
-
     /// index options
-    pub opts: IndexOptions,
+    opts: IndexOptions,
 }
 
 impl Index {
+    pub fn new(
+        name: String,
+        pattern: String,
+        less: Option<LessFn>,
+        rect: Option<RectFn>,
+        opts: IndexOptions,
+    ) -> Self {
+        Index {
+            btr: None,
+            name,
+            pattern,
+            less,
+            rect,
+            opts,
+        }
+    }
+
     pub fn matches(&self, key: &str) -> bool {
         let mut key = key.to_string();
         if self.pattern == "*" {
@@ -85,18 +99,15 @@ impl Index {
             btr: None,
             name: self.name.clone(),
             pattern: self.pattern.clone(),
-            // db: self.db.clone(),
             less: self.less.clone(),
             rect: self.rect.clone(),
             opts: self.opts.clone(),
         };
 
         // initialize with empty trees
-        if nidx.less.is_some() {
-            // TODO: duplicated in `rebuild`
-            let less_fn = nidx.less.clone().unwrap();
+        // NOTE: keep in sync with fn in `rebuild`
+        if let Some(less_fn) = self.less.clone() {
             let compare_fn = Box::new(move |a: &DbItem, b: &DbItem| {
-                // TODO: remove these clones
                 if less_fn(&a.val, &b.val) {
                     return Ordering::Less;
                 }
@@ -125,27 +136,25 @@ impl Index {
     // `rebuild` rebuilds the index
     pub fn rebuild(&mut self, db: &Db) {
         // initialize trees
+        // NOTE: keep in sync with fn in `clear_copy`
         if let Some(less_fn) = self.less.clone() {
-            // TODO: less_ctx(self)
-            self.btr = Some(BTreeC::new(Box::new(move |a: &DbItem, b: &DbItem| {
-                eprintln!("index compare fn a: {} b: {}", a.val, b.val);
-                // using an index less_fn
+            let compare_fn = Box::new(move |a: &DbItem, b: &DbItem| {
                 if less_fn(&a.val, &b.val) {
                     return Ordering::Less;
                 }
-                eprintln!("second index compare fn a: {} b: {}", a.val, b.val);
                 if less_fn(&b.val, &a.val) {
                     return Ordering::Greater;
                 }
 
-                // Always fall back to the key comparison. This creates absolute uniqueness.
                 if a.keyless {
                     return Ordering::Greater;
                 } else if b.keyless {
                     return Ordering::Less;
                 }
                 a.key.cmp(&b.key)
-            })));
+            });
+            let btree = BTreeC::new(compare_fn);
+            self.btr = Some(btree);
         }
         if self.rect.is_some() {
             // TODO:
