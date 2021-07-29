@@ -1361,26 +1361,62 @@ impl<'db> Tx<'db> {
                     item.write_delete_to(&mut db.buf);
                 }
             }
+
             // Flushing the buffer only once per transaction.
             // If this operation fails then the write did failed and we must
             // rollback.
-            let mut n = 0;
+            {
+                let file = db.file.as_mut().unwrap();
+                let mut total_written: i64 = 0;
+                let mut buf = &mut db.buf[..];
+                let mut has_err = false;
 
-            // TODO: handle partial writes
-            let db_file = db.file.as_mut().unwrap();
-            let sync_policy = db.config.sync_policy.clone();
+                while !buf.is_empty() {
+                    match file.write(buf) {
+                        Ok(0) => {
+                            has_err = true;
+                        }
+                        Ok(n) => {
+                            buf = &mut buf[n..];
+                            total_written += n as i64;
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            has_err = true;
+                        }
+                    };
 
-            if let Err(e) = db.file.as_mut().unwrap().write_all(&db.buf) {
-                self.rollback_inner();
-                // TODO: return error
+                    if has_err {
+                        break;
+                    }
+                }
+
+                if has_err {
+                    if total_written > 0 {
+                        // There was a partial write to disk.
+                        // We are possibly out of disk space.
+                        // Delete the partially written bytes from the data file by
+                        // seeking to the previously known position and performing
+                        // a truncate operation.
+                        // At this point a syscall failure is fatal and the process
+                        // should be killed to avoid corrupting the file.
+                        use std::io::Seek;
+                        let pos = file.seek(io::SeekFrom::Current(-total_written)).unwrap();
+                        file.set_len(pos).unwrap();
+                    }
+                    self.rollback_inner();
+                }
             }
 
-            if sync_policy == SyncPolicy::Always {
-                let _ = self.db.as_mut().unwrap().file.as_mut().unwrap().sync_all();
+            let db = self.db.as_mut().unwrap();
+            let file = db.file.as_mut().unwrap();
+
+            if db.config.sync_policy == SyncPolicy::Always {
+                let _ = file.sync_all();
             }
 
             // Increment the number of flushes. The background syncing uses this.
-            self.db.as_mut().unwrap().flushes += 1;
+            db.flushes += 1;
         }
         // Unlock the database and allow for another writable transaction.
         self.unlock();
