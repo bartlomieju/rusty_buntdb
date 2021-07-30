@@ -6,6 +6,7 @@
 use btreec::BTreeC;
 use parking_lot::lock_api::RawRwLock as _;
 use parking_lot::RawRwLock;
+use parking_lot::RwLock;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::error::Error;
@@ -93,6 +94,51 @@ impl fmt::Display for DbError {
 }
 
 impl Error for DbError {}
+
+struct DbInner {
+    /// the gatekeeper for all fields
+    mu: RawRwLock,
+
+    /// the underlying file
+    file: Option<File>,
+
+    /// a buffer to write to
+    buf: Vec<u8>,
+
+    /// a tree of all item ordered by key
+    keys: BTreeC<DbItem>,
+
+    /// a tree of items ordered by expiration
+    exps: BTreeC<DbItem>,
+
+    /// the index trees.
+    idxs: HashMap<String, Index>,
+
+    /// a reuse buffer for gathering indexes
+    #[allow(unused)]
+    ins_idxs: Vec<Index>,
+
+    /// a count of the number of disk flushes
+    flushes: i64,
+
+    /// set when the database has been closed
+    closed: bool,
+
+    /// the database configuration
+    config: Config,
+
+    /// do we write to disk
+    persist: bool,
+
+    /// when an aof shrink is in-process.
+    #[allow(unused)]
+    shrinking: bool,
+
+    /// the size of the last shrink aof size
+    lastaofsz: u64,
+}
+
+pub struct DbNew(Arc<RwLock<DbInner>>);
 
 /// Db represents a collection of key-value pairs that persist on disk.
 /// Transactions are used for all forms of data access to the Db.
