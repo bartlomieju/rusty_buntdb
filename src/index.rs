@@ -1,18 +1,5 @@
 use btreec::BTreeC;
-use once_cell::sync::OnceCell;
-use parking_lot::lock_api::RawRwLock as _;
-use parking_lot::RawRwLock;
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::Write;
-use std::sync::Arc;
-use std::sync::RwLock;
-use std::time;
 
 use crate::item::DbItem;
 use crate::Db;
@@ -78,7 +65,7 @@ impl Index {
         }
 
         if self.opts.case_insensitive_key_matching {
-            let mut chars_iter = key.chars();
+            let chars_iter = key.chars();
             for char_ in chars_iter {
                 if ('A'..='Z').contains(&char_) {
                     key = key.to_lowercase();

@@ -3,10 +3,7 @@
 //! readers and a single writer. Bunt is ideal for projects that need a
 //! dependable database, and favor speed over data size.
 
-#![allow(unused)]
-
 use btreec::BTreeC;
-use once_cell::sync::OnceCell;
 use parking_lot::lock_api::RawRwLock as _;
 use parking_lot::RawRwLock;
 use std::cmp::Ordering;
@@ -16,9 +13,7 @@ use std::fmt;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
-use std::io::Write;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time;
 
 mod tx;
@@ -121,6 +116,7 @@ pub struct Db {
     idxs: HashMap<String, Index>,
 
     /// a reuse buffer for gathering indexes
+    #[allow(unused)]
     ins_idxs: Vec<Index>,
 
     /// a count of the number of disk flushes
@@ -136,6 +132,7 @@ pub struct Db {
     persist: bool,
 
     /// when an aof shrink is in-process.
+    #[allow(unused)]
     shrinking: bool,
 
     /// the size of the last shrink aof size
@@ -347,8 +344,8 @@ impl Db {
     /// Returns the number of bytes of the last command read and the error if any.
     pub fn read_load(
         &self,
-        reader: &dyn io::Read,
-        mod_time: time::SystemTime,
+        _reader: &dyn io::Read,
+        _mod_time: time::SystemTime,
     ) -> (u64, Option<io::Error>) {
         // let mut total_size = 0;
         // let mut data = Vec::with_capacity(4096);
@@ -369,6 +366,7 @@ impl Db {
     /// of RESP commands. For more information on RESP please read
     /// http://redis.io/topics/protocol. The only supported RESP commands are DEL and
     /// SET.
+    #[allow(unused)]
     fn load_from_disk(&mut self) -> Result<(), io::Error> {
         let mut file = &(*self.file.as_ref().unwrap());
         let metadata = file.metadata()?;
@@ -635,6 +633,7 @@ impl Db {
     }
 
     // Returns true if database has been closed.
+    #[allow(unused)]
     fn background_manager_inner(&mut self, mut flushes: i64) -> bool {
         let mut shrink = false;
         let mut expired = vec![];
@@ -668,7 +667,7 @@ impl Db {
                 true
             });
             if on_expired.is_none() && on_expired_sync.is_none() {
-                for (key, value) in &expired {
+                for (key, _) in &expired {
                     if let Err(err) = tx.delete(key.to_string()) {
                         // it's ok to get a "not found" because the
                         // 'Delete' method reports "not found" for
@@ -728,6 +727,7 @@ impl Db {
 
     /// backgroundManager runs continuously in the background and performs various
     /// operations such as removing expired items and syncing to disk.
+    #[allow(unused)]
     fn background_manager(&mut self) -> std::thread::JoinHandle<()> {
         todo!();
 
@@ -747,6 +747,7 @@ impl Db {
 
     /// Shrink will make the database file smaller by removing redundant
     /// log entries. This operation does not block the database.
+    #[allow(unused)]
     fn shrink(&mut self) -> Result<(), DbError> {
         todo!()
     }
@@ -836,13 +837,14 @@ pub struct SetOptions {
 }
 
 // rect is used by Intersects and Nearby
+#[allow(unused)]
 struct Rect {
     min: Vec<f64>,
     max: Vec<f64>,
 }
 
 // index_int is a helper function that returns true if 'a` is less than 'b'
-fn index_int(a: &str, b: &str) -> bool {
+pub fn index_int(a: &str, b: &str) -> bool {
     let ia = a.parse::<i64>().unwrap();
     let ib = b.parse::<i64>().unwrap();
     ia < ib
@@ -851,7 +853,7 @@ fn index_int(a: &str, b: &str) -> bool {
 // IndexUint is a helper function that returns true if 'a' is less than 'b'.
 // This compares uint64s that are added to the database using the
 // Uint() conversion function.
-fn index_uint(a: &str, b: &str) -> bool {
+pub fn index_uint(a: &str, b: &str) -> bool {
     let ia = a.parse::<u64>().unwrap();
     let ib = b.parse::<u64>().unwrap();
     ia < ib
@@ -860,7 +862,7 @@ fn index_uint(a: &str, b: &str) -> bool {
 // index_float is a helper function that returns true if 'a` is less than 'b'.
 // This compares float64s that are added to the database using the
 // Float() conversion function.
-fn index_float(a: &str, b: &str) -> bool {
+pub fn index_float(a: &str, b: &str) -> bool {
     let ia = a.parse::<f64>().unwrap();
     let ib = b.parse::<f64>().unwrap();
     ia < ib
@@ -869,11 +871,11 @@ fn index_float(a: &str, b: &str) -> bool {
 // IndexString is a helper function that return true if 'a' is less than 'b'.
 // This is a case-insensitive comparison. Use the IndexBinary() for comparing
 // case-sensitive strings.
-fn index_string(a: &str, b: &str) -> bool {
+pub fn index_string(a: &str, b: &str) -> bool {
     a.to_lowercase().cmp(&b.to_lowercase()) == Ordering::Less
 }
 
-fn index_string_case_sensitive(a: &str, b: &str) -> bool {
+pub fn index_string_case_sensitive(a: &str, b: &str) -> bool {
     a.cmp(&b) == Ordering::Less
 }
 
@@ -886,7 +888,7 @@ mod tests {
     }
 
     fn test_open() -> Db {
-        std::fs::remove_file("data.db");
+        let _ = std::fs::remove_file("data.db");
         test_reopen(None)
     }
 
@@ -909,7 +911,7 @@ mod tests {
 
     #[test]
     fn save_load() {
-        let db = Db::open(":memory:").unwrap();
+        let _db = Db::open(":memory:").unwrap();
     }
 
     #[test]
@@ -940,9 +942,9 @@ mod tests {
 
         // test creating an index and adding items
         db.update(|tx| {
-            tx.set("1".to_string(), "3".to_string(), None);
-            tx.set("2".to_string(), "2".to_string(), None);
-            tx.set("3".to_string(), "1".to_string(), None);
+            tx.set("1".to_string(), "3".to_string(), None).unwrap();
+            tx.set("2".to_string(), "2".to_string(), None).unwrap();
+            tx.set("3".to_string(), "1".to_string(), None).unwrap();
             tx.create_index(
                 "idx1".to_string(),
                 "*".to_string(),
@@ -958,7 +960,7 @@ mod tests {
         // test force rollback.
         db.update::<_, ()>(|tx| {
             ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
-            tx.set("4".to_string(), "0".to_string(), None);
+            tx.set("4".to_string(), "0".to_string(), None).unwrap();
             ascend_equal(tx, "idx1", svec!["4", "0", "3", "1", "2", "2", "1", "3"]);
             Err(DbError::Custom("this is fine".to_string()))
         })
@@ -968,7 +970,8 @@ mod tests {
         db.view(|tx| {
             ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
             Ok(())
-        });
+        })
+        .unwrap();
 
         // del item, drop index, rollback
         db.update::<_, ()>(|tx| {
@@ -995,22 +998,22 @@ mod tests {
                 vec![Arc::new(index_int)],
             )
             .unwrap();
-            tx.set("4".to_string(), "0".to_string(), None);
+            tx.set("4".to_string(), "0".to_string(), None).unwrap();
             ascend_equal(tx, "idx1", svec!["4", "0", "2", "2", "1", "3"]);
             ascend_equal(tx, "idx2", svec!["4", "0", "2", "2", "1", "3"]);
-            tx.delete_all();
+            tx.delete_all().unwrap();
             ascend_equal(tx, "idx1", svec![]);
             ascend_equal(tx, "idx2", svec![]);
-            tx.set("1".to_string(), "3".to_string(), None);
-            tx.set("2".to_string(), "2".to_string(), None);
+            tx.set("1".to_string(), "3".to_string(), None).unwrap();
+            tx.set("2".to_string(), "2".to_string(), None).unwrap();
             // FIXME: there should be unwraps here, but it panics on `IndexExists`.
             // It seems these are spurious? Indexes are not deleted by `delete_all()`
-            tx.create_index(
+            let _ = tx.create_index(
                 "idx1".to_string(),
                 "*".to_string(),
                 vec![Arc::new(index_int)],
             );
-            tx.create_index(
+            let _ = tx.create_index(
                 "idx2".to_string(),
                 "*".to_string(),
                 vec![Arc::new(index_int)],
@@ -1060,9 +1063,9 @@ mod tests {
         let mut db = test_open();
 
         db.update(|tx| {
-            tx.set("hello1".to_string(), "planet1".to_string(), None);
-            tx.set("hello2".to_string(), "planet2".to_string(), None);
-            tx.set("hello3".to_string(), "planet3".to_string(), None);
+            tx.set("hello1".to_string(), "planet1".to_string(), None)?;
+            tx.set("hello2".to_string(), "planet2".to_string(), None)?;
+            tx.set("hello3".to_string(), "planet3".to_string(), None)?;
             Ok(())
         })
         .unwrap();
@@ -1073,12 +1076,12 @@ mod tests {
         )
         .unwrap();
         db.update(|tx| {
-            tx.set("hello1".to_string(), "planet1.1".to_string(), None);
-            tx.delete_all();
-            tx.set("bb".to_string(), "11".to_string(), None);
-            tx.set("aa".to_string(), "**".to_string(), None);
-            tx.delete("aa".to_string());
-            tx.set("aa".to_string(), "22".to_string(), None);
+            tx.set("hello1".to_string(), "planet1.1".to_string(), None)?;
+            tx.delete_all()?;
+            tx.set("bb".to_string(), "11".to_string(), None)?;
+            tx.set("aa".to_string(), "**".to_string(), None)?;
+            tx.delete("aa".to_string())?;
+            tx.set("aa".to_string(), "22".to_string(), None)?;
             Ok(())
         })
         .unwrap();
@@ -1245,7 +1248,8 @@ mod tests {
         let mut db = test_open();
 
         db.update(|tx| {
-            tx.set("hello".to_string(), "planet".to_string(), None);
+            tx.set("hello".to_string(), "planet".to_string(), None)
+                .unwrap();
             Ok(())
         })
         .unwrap();
@@ -1253,7 +1257,8 @@ mod tests {
         let err_broken = DbError::Custom("broken".to_string());
         let e = db
             .update::<_, ()>(|tx| {
-                tx.set("hello".to_string(), "world".to_string(), None);
+                tx.set("hello".to_string(), "world".to_string(), None)
+                    .unwrap();
                 Err(err_broken.clone())
             })
             .unwrap_err();
@@ -1308,7 +1313,8 @@ mod tests {
 
         // test non-managed transactions
         let mut tx = db.begin(true).unwrap();
-        tx.set("howdy".to_string(), "world".to_string(), None);
+        tx.set("howdy".to_string(), "world".to_string(), None)
+            .unwrap();
         tx.commit().unwrap();
         drop(tx);
 
@@ -1322,7 +1328,7 @@ mod tests {
         let v = tx2.get("howdy".to_string(), false).unwrap();
         assert_eq!(v, "world");
         tx2.delete("howdy".to_string()).unwrap();
-        tx2.commit();
+        tx2.commit().unwrap();
         drop(tx2);
 
         // test fo closed transactions
@@ -1345,9 +1351,10 @@ mod tests {
     fn test_panic_during_commit_in_managed_tx() {
         let mut db = Db::open(":memory:").unwrap();
         db.update(|tx| {
-            tx.commit();
+            tx.commit()?;
             Ok(())
-        });
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1355,9 +1362,10 @@ mod tests {
     fn test_panic_during_rollback_in_managed_tx() {
         let mut db = Db::open(":memory:").unwrap();
         db.update(|tx| {
-            tx.rollback();
+            tx.rollback()?;
             Ok(())
-        });
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1368,14 +1376,16 @@ mod tests {
             "name".to_string(),
             "*".to_string(),
             vec![Arc::new(index_string)],
-        );
+        )
+        .unwrap();
         db.update(|tx| {
-            tx.set("1".to_string(), "Tom".to_string(), None);
-            tx.set("2".to_string(), "Janet".to_string(), None);
-            tx.set("3".to_string(), "Carol".to_string(), None);
-            tx.set("4".to_string(), "Alan".to_string(), None);
-            tx.set("5".to_string(), "Sam".to_string(), None);
-            tx.set("6".to_string(), "Melinda".to_string(), None);
+            tx.set("1".to_string(), "Tom".to_string(), None).unwrap();
+            tx.set("2".to_string(), "Janet".to_string(), None).unwrap();
+            tx.set("3".to_string(), "Carol".to_string(), None).unwrap();
+            tx.set("4".to_string(), "Alan".to_string(), None).unwrap();
+            tx.set("5".to_string(), "Sam".to_string(), None).unwrap();
+            tx.set("6".to_string(), "Melinda".to_string(), None)
+                .unwrap();
             Ok(())
         })
         .unwrap();
@@ -1383,9 +1393,11 @@ mod tests {
             tx.ascend("name".to_string(), |k, v| {
                 collected.push(format!("{}: {}", k, v));
                 true
-            });
+            })
+            .unwrap();
             Ok(())
-        });
+        })
+        .unwrap();
         assert_eq!(
             collected,
             svec![
@@ -1407,14 +1419,15 @@ mod tests {
             "age".to_string(),
             "*".to_string(),
             vec![Arc::new(index_int)],
-        );
+        )
+        .unwrap();
         db.update(|tx| {
-            tx.set("1".to_string(), "30".to_string(), None);
-            tx.set("2".to_string(), "51".to_string(), None);
-            tx.set("3".to_string(), "16".to_string(), None);
-            tx.set("4".to_string(), "76".to_string(), None);
-            tx.set("5".to_string(), "23".to_string(), None);
-            tx.set("6".to_string(), "43".to_string(), None);
+            tx.set("1".to_string(), "30".to_string(), None).unwrap();
+            tx.set("2".to_string(), "51".to_string(), None).unwrap();
+            tx.set("3".to_string(), "16".to_string(), None).unwrap();
+            tx.set("4".to_string(), "76".to_string(), None).unwrap();
+            tx.set("5".to_string(), "23".to_string(), None).unwrap();
+            tx.set("6".to_string(), "43".to_string(), None).unwrap();
             Ok(())
         })
         .unwrap();
@@ -1422,9 +1435,11 @@ mod tests {
             tx.ascend("age".to_string(), |k, v| {
                 collected.push(format!("{}: {}", k, v));
                 true
-            });
+            })
+            .unwrap();
             Ok(())
-        });
+        })
+        .unwrap();
         assert_eq!(
             collected,
             svec!["3: 16", "5: 23", "1: 30", "6: 43", "2: 51", "4: 76"]
@@ -1483,7 +1498,7 @@ mod tests {
         let mut db = test_open();
 
         // Only one item is eligible for the index, so no comparison is necessary.
-        fn fail(a: &str, b: &str) -> bool {
+        fn fail(_a: &str, _b: &str) -> bool {
             unreachable!()
         }
 
@@ -1510,7 +1525,7 @@ mod tests {
         let mut db = test_open();
 
         // Only one item is eligible for the index, so no comparison is necessary.
-        fn fail(a: &str, b: &str) -> bool {
+        fn fail(_a: &str, _b: &str) -> bool {
             unreachable!()
         }
 

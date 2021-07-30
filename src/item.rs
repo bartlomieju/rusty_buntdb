@@ -1,17 +1,4 @@
-use btreec::BTreeC;
 use once_cell::sync::OnceCell;
-use parking_lot::lock_api::RawRwLock as _;
-use parking_lot::RawRwLock;
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::Write;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::time;
 
 /// DbItemOpts holds various meta information about an item.

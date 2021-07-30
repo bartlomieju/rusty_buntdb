@@ -1,17 +1,8 @@
 use btreec::BTreeC;
-use once_cell::sync::OnceCell;
 use parking_lot::lock_api::RawRwLock as _;
-use parking_lot::RawRwLock;
-use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
-use std::fs::File;
-use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::time;
 
 use crate::btree_helpers::*;
@@ -416,9 +407,8 @@ impl<'db> Tx<'db> {
             return Err(DbError::TxNotWritable);
         }
 
-        let mut result = Ok(());
-        let mut db = self.db.as_mut().unwrap();
-        let mut wc = self.wc.as_mut().unwrap();
+        let db = self.db.as_mut().unwrap();
+        let wc = self.wc.as_mut().unwrap();
         if db.persist && (!wc.commit_items.is_empty() || wc.rbkeys.is_some()) {
             db.buf.clear();
             // write a flushdb if a deleteAll was called
@@ -457,7 +447,7 @@ impl<'db> Tx<'db> {
                             total_written += n as i64;
                         }
                         Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                        Err(e) => {
+                        Err(_) => {
                             has_err = true;
                         }
                     };
@@ -498,7 +488,7 @@ impl<'db> Tx<'db> {
         self.unlock();
         // Clear the db field to disable this transaction from future use.
         self.db = None;
-        result
+        Ok(())
     }
 
     // Rollback closes the transaction and reverts all mutable operations that
@@ -546,7 +536,8 @@ impl<'db> Tx<'db> {
     // doing ad-hoc searches inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no rect
     // function bound to the index
-    fn get_rect(&self, index: String) -> Result<(), DbError> {
+    #[allow(unused)]
+    fn get_rect(&self, _index: String) -> Result<(), DbError> {
         todo!()
     }
 
@@ -746,7 +737,7 @@ impl<'db> Tx<'db> {
         index: &str,
         start: &str,
         stop: &str,
-        mut iterator: F,
+        iterator: F,
     ) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
@@ -756,7 +747,7 @@ impl<'db> Tx<'db> {
         }
 
         let db = self.db.as_ref().unwrap();
-        let mut tr;
+        let tr;
 
         if index.is_empty() {
             // empty index means we will use the keys tree
@@ -853,7 +844,7 @@ impl<'db> Tx<'db> {
     }
 
     // AscendKeys allows for iterating through keys based on the specified pattern.
-    pub fn ascend_keys<F>(&mut self, pattern: &str, iterator: F) -> Result<(), DbError>
+    pub fn ascend_keys<F>(&mut self, _pattern: &str, _iterator: F) -> Result<(), DbError>
     where
         F: FnMut(&str, &str) -> bool,
     {
@@ -861,7 +852,7 @@ impl<'db> Tx<'db> {
     }
 
     // DescendKeys allows for iterating through keys based on the specified pattern.
-    pub fn descend_keys<F>(&mut self, pattern: String, iterator: F) -> Result<(), DbError>
+    pub fn descend_keys<F>(&mut self, _pattern: String, _iterator: F) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
     {
@@ -1106,7 +1097,12 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     // The dist param is the distance of the bounding boxes. In the case of
     // simple 2D points, it's the distance of the two 2D points squared.
-    pub fn nearby<F>(&mut self, index: String, bounds: String, iterator: F) -> Result<(), DbError>
+    pub fn nearby<F>(
+        &mut self,
+        _index: String,
+        _bounds: String,
+        _iterator: F,
+    ) -> Result<(), DbError>
     where
         F: Fn(String, String, f64) -> bool,
     {
@@ -1120,9 +1116,9 @@ impl<'db> Tx<'db> {
     // An invalid index will return an error.
     pub fn intersects<F>(
         &mut self,
-        index: String,
-        bounds: String,
-        iterator: F,
+        _index: String,
+        _bounds: String,
+        _iterator: F,
     ) -> Result<(), DbError>
     where
         F: Fn(String, String) -> bool,
