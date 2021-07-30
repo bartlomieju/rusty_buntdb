@@ -27,8 +27,8 @@ use item::DbItemOpts;
 mod btree_helpers;
 use btree_helpers::btree_ascend_less_than;
 
-type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
-type LessFn = Arc<dyn Fn(&str, &str) -> bool>;
+type RectFn = dyn Fn(String) -> (Vec<f64>, Vec<f64>) + Send + Sync;
+type LessFn = dyn Fn(&str, &str) -> bool + Send + Sync;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DbError {
@@ -286,8 +286,9 @@ impl Default for SyncPolicy {
     }
 }
 
-pub type OnExpiredFn = &'static dyn for<'e> Fn(Vec<String>);
-pub type OnExpiredSyncFn = &'static dyn for<'e> Fn(String, String, &mut Tx) -> Result<(), DbError>;
+pub type OnExpiredFn = dyn for<'e> Fn(Vec<String>) + Send + Sync;
+pub type OnExpiredSyncFn =
+    dyn for<'e> Fn(String, String, &mut Tx) -> Result<(), DbError> + Send + Sync;
 
 // Config represents database configuration options. These
 // options are used to change various behaviors of the database.
@@ -315,14 +316,14 @@ pub struct Config {
 
     // `on_expired` is used to custom handle the deletion option when a key
     // has been expired.
-    on_expired: Option<OnExpiredFn>,
+    on_expired: Option<Arc<OnExpiredFn>>,
 
     // `on_expired_sync` will be called inside the same transaction that is
     // performing the deletion of expired items. If OnExpired is present then
     // this callback will not be called. If this callback is present, then the
     // deletion of the timeed-out item is the explicit responsibility of this
     // callback.
-    on_expired_sync: Option<OnExpiredSyncFn>,
+    on_expired_sync: Option<Arc<OnExpiredSyncFn>>,
 }
 
 fn keys_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
@@ -396,6 +397,7 @@ impl Db {
         let db = Db(Arc::new(RwLock::new(inner)));
         // TODO:
         // start the background manager
+        db.background_manager();
 
         Ok(db)
     }
@@ -550,7 +552,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<LessFn>,
+        less: Vec<Arc<LessFn>>,
     ) -> Result<(), DbError> {
         self.update(move |tx| tx.create_index(name, pattern, less))
     }
@@ -563,7 +565,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<LessFn>,
+        less: Vec<Arc<LessFn>>,
     ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
@@ -597,7 +599,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        rect: RectFn,
+        rect: Arc<RectFn>,
     ) -> Result<(), DbError> {
         self.update(|tx| tx.create_spatial_index(name, pattern, rect))
     }
@@ -610,7 +612,7 @@ impl Db {
         &mut self,
         name: String,
         pattern: String,
-        rect: RectFn,
+        rect: Arc<RectFn>,
     ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_spatial_index(name.clone(), pattern.clone(), rect.clone()) {
@@ -668,10 +670,10 @@ impl Db {
         // database thus allowing for access to anything we need.
         let update_result = self.update(|tx| {
             let db = tx.db_lock.as_ref().unwrap().as_ref();
-            on_expired = db.config.on_expired;
+            on_expired = db.config.on_expired.clone();
 
             if on_expired.is_none() {
-                on_expired_sync = db.config.on_expired_sync;
+                on_expired_sync = db.config.on_expired_sync.clone();
             }
 
             if db.persist && !db.config.auto_shrink_disabled {
@@ -750,22 +752,21 @@ impl Db {
 
     /// backgroundManager runs continuously in the background and performs various
     /// operations such as removing expired items and syncing to disk.
-    #[allow(unused)]
-    fn background_manager(&mut self) -> std::thread::JoinHandle<()> {
-        todo!();
+    fn background_manager(&self) -> std::thread::JoinHandle<()> {
+        let db = self.clone();
+        // TODO: join handle should be saved in the struct?
+        std::thread::spawn(move || {
+            let flushes = 0;
+            loop {
+                // FIXME: this is naive, we'll be sleeping 1s between `background_manager_inner`
+                // calls, instead of calling `background_manager_inner` every second
+                std::thread::sleep(time::Duration::from_secs(1));
 
-        // std::thread::spawn(move || {
-        //     let mut flushes = 0;
-        //     loop {
-        //         // FIXME: this is naive, we'll be sleeping 1s between `background_manager_inner`
-        //         // calls, instead of calling `background_manager_inner` every second
-        //         std::thread::sleep(time::Duration::from_secs(1));
-
-        //         if self.background_manager_inner(flushes) {
-        //             break;
-        //         }
-        //     }
-        // })
+                if db.clone().background_manager_inner(flushes) {
+                    break;
+                }
+            }
+        })
     }
 
     /// Shrink will make the database file smaller by removing redundant

@@ -17,6 +17,7 @@ use crate::LessFn;
 use crate::RectFn;
 use crate::SetOptions;
 use crate::SyncPolicy;
+use std::sync::Arc;
 
 // Tx represents a transaction on the database. This transaction can either be
 // read-only or read/write. Read-only transactions can be used for retrieving
@@ -148,8 +149,8 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        lessers: Vec<LessFn>,
-        rect: Option<RectFn>,
+        lessers: Vec<Arc<LessFn>>,
+        rect: Option<Arc<RectFn>>,
         opts: Option<IndexOptions>,
     ) -> Result<(), DbError> {
         if self.db_lock.is_none() {
@@ -241,7 +242,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        less: Vec<LessFn>,
+        less: Vec<Arc<LessFn>>,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, None)
     }
@@ -253,7 +254,7 @@ impl<'db> Tx<'db> {
         name: String,
         pattern: String,
         opts: IndexOptions,
-        less: Vec<LessFn>,
+        less: Vec<Arc<LessFn>>,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, less, None, Some(opts))
     }
@@ -276,7 +277,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        rect: RectFn,
+        rect: Arc<RectFn>,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, vec![], Some(rect), None)
     }
@@ -287,7 +288,7 @@ impl<'db> Tx<'db> {
         &mut self,
         name: String,
         pattern: String,
-        rect: RectFn,
+        rect: Arc<RectFn>,
         opts: IndexOptions,
     ) -> Result<(), DbError> {
         self.create_index_inner(name, pattern, vec![], Some(rect), Some(opts))
@@ -508,7 +509,7 @@ impl<'db> Tx<'db> {
     // doing ad-hoc compares inside a transaction.
     // Returns ErrNotFound if the index is not found or there is no less
     // function bound to the index
-    fn get_less(&self, index: String) -> Result<LessFn, DbError> {
+    fn get_less(&self, index: String) -> Result<Arc<LessFn>, DbError> {
         if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }

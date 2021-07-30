@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use crate::item::DbItem;
 use crate::LessFn;
 use crate::RectFn;
+use std::sync::Arc;
 
 /// `IndexOptions` provides an index with additional features or
 /// alternate functionality.
@@ -30,10 +31,10 @@ pub struct Index {
     pattern: String,
 
     /// less comparison function
-    pub less: Option<LessFn>,
+    pub less: Option<Arc<LessFn>>,
 
     /// rect from string function
-    pub rect: Option<RectFn>,
+    pub rect: Option<Arc<RectFn>>,
 
     /// index options
     opts: IndexOptions,
@@ -43,8 +44,8 @@ impl Index {
     pub fn new(
         name: String,
         pattern: String,
-        less: Option<LessFn>,
-        rect: Option<RectFn>,
+        less: Option<Arc<LessFn>>,
+        rect: Option<Arc<RectFn>>,
         opts: IndexOptions,
     ) -> Self {
         Index {
