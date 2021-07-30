@@ -18,17 +18,17 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time;
 
-mod tx;
-use tx::*;
-mod index;
-use index::*;
-mod item;
-use item::DbItem;
-use item::DbItemOpts;
 mod btree_helpers;
-use btree_helpers::btree_ascend_less_than;
+mod index;
+mod item;
+mod tx;
 
 use crate::btree_helpers::btree_ascend_greater_or_equal;
+use crate::btree_helpers::btree_ascend_less_than;
+use crate::index::*;
+use crate::item::DbItem;
+use crate::item::DbItemOpts;
+use crate::tx::*;
 
 type RectFn = dyn Fn(String) -> (Vec<f64>, Vec<f64>) + Send + Sync;
 type LessFn = dyn Fn(&str, &str) -> bool + Send + Sync;
@@ -119,7 +119,6 @@ impl<'db> DbLock<'db> {
     }
 }
 
-#[allow(unused)]
 pub(crate) struct DbInner {
     /// the underlying file
     file: Option<File>,
@@ -136,7 +135,9 @@ pub(crate) struct DbInner {
     /// the index trees.
     idxs: HashMap<String, Index>,
 
+    // TODO: use me
     /// a reuse buffer for gathering indexes
+    #[allow(unused)]
     ins_idxs: Vec<Index>,
 
     /// a count of the number of disk flushes
@@ -167,7 +168,6 @@ impl DbInner {
         })
     }
 
-    // TODO: should be a method on `DbInner`
     /// insertIntoDatabase performs inserts an item in to the database and updates
     /// all indexes. If a previous item with the same key already exists, that item
     /// will be replaced with the new one, and return the previous item.
@@ -262,7 +262,6 @@ impl DbInner {
 /// Db represents a collection of key-value pairs that persist on disk.
 /// Transactions are used for all forms of data access to the Db.
 #[derive(Clone)]
-
 pub struct Db(Arc<RwLock<DbInner>>);
 
 /// SyncPolicy represents how often data is synced to disk.
@@ -662,8 +661,7 @@ impl Db {
     }
 
     // Returns true if database has been closed.
-    #[allow(unused)]
-    fn background_manager_inner(&mut self, mut flushes: i64) -> bool {
+    fn background_manager_inner(&mut self, flushes: &mut i64) -> bool {
         let mut shrink = false;
         let mut expired = vec![];
         let mut on_expired = None;
@@ -672,7 +670,7 @@ impl Db {
         // Open a standard view. This will take a full lock of the
         // database thus allowing for access to anything we need.
         let update_result = self.update(|tx| {
-            let mut db = tx.db_lock.as_mut().unwrap().as_mut();
+            let db = tx.db_lock.as_mut().unwrap().as_mut();
             on_expired = db.config.on_expired.clone();
 
             if on_expired.is_none() {
@@ -748,10 +746,10 @@ impl Db {
             let mut db = self.0.write();
             if db.persist
                 && db.config.sync_policy == SyncPolicy::EverySecond
-                && flushes != db.flushes
+                && *flushes != db.flushes
             {
                 let _ = db.file.as_mut().unwrap().sync_all();
-                flushes = db.flushes;
+                *flushes = db.flushes;
             }
         }
 
@@ -772,20 +770,20 @@ impl Db {
         let db = self.clone();
         // TODO: join handle should be saved in the struct?
         std::thread::spawn(move || {
-            let flushes = 0;
+            let mut flushes = 0;
             loop {
                 // FIXME: this is naive, we'll be sleeping 1s between `background_manager_inner`
                 // calls, instead of calling `background_manager_inner` every second
                 std::thread::sleep(time::Duration::from_secs(1));
 
-                if db.clone().background_manager_inner(flushes) {
+                if db.clone().background_manager_inner(&mut flushes) {
                     break;
                 }
             }
         })
     }
 
-    // TODO: this functions uses to much `.unwrap()` and `expect()`, should
+    // TODO: this function uses to much `.unwrap()` and `expect()`, should
     // be rewritten to handle errors gracefully.
     /// Shrink will make the database file smaller by removing redundant
     /// log entries. This operation does not block the database.
@@ -1497,7 +1495,6 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err, DbError::TxClosed);
-        // unsafe { db.mu.unlock_exclusive() };
 
         // test for invalid writes
 

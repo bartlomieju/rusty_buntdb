@@ -26,10 +26,8 @@ use std::sync::Arc;
 //
 // All transactions must be committed or rolled-back when done.
 pub struct Tx<'db> {
+    /// the underlying database.
     pub(crate) db_lock: Option<DbLock<'db>>,
-
-    /// are we currently holding DB lock?
-    has_lock: bool,
     /// when false mutable operations fail.
     pub(crate) writable: bool,
     /// when true Commit and Rollback panic.
@@ -63,14 +61,13 @@ impl<'db> Tx<'db> {
     pub(crate) fn new(db_lock: DbLock<'db>, writable: bool) -> Result<Self, DbError> {
         let mut tx = Tx {
             db_lock: Some(db_lock),
-            has_lock: true,
             writable,
             funcd: false,
             wc: None,
         };
 
         if tx.db_lock.as_ref().unwrap().as_ref().closed {
-            tx.unlock();
+            tx.db_lock.take();
             return Err(DbError::DatabaseClosed);
         }
 
@@ -329,24 +326,6 @@ impl<'db> Tx<'db> {
         Ok(())
     }
 
-    // lock locks the database based on the transaction type.
-    // pub fn lock(&mut self) {
-    //     let db = self.db.clone().unwrap();
-    //     let db_lock = if self.writable {
-    //         DbLock::Write(db.0.write())
-    //     } else {
-    //         DbLock::Read(db.0.read())
-    //     };
-    //     self.db_lock = Some(db_lock);
-    //     self.has_lock = true;
-    // }
-
-    // unlock unlocks the database based on the transaction type.
-    pub fn unlock(&mut self) {
-        self.db_lock.take();
-        self.has_lock = false;
-    }
-
     // rollbackInner handles the underlying rollback logic.
     // Intended to be called from Commit() and Rollback().
     fn rollback_inner(&mut self) {
@@ -361,7 +340,7 @@ impl<'db> Tx<'db> {
         }
 
         for (key, maybe_item) in wc.rollback_items.drain() {
-            // TODO: make a helper on DbItem
+            // TODO: make a helper on DbItem to create "key item"
             db.delete_from_database(DbItem {
                 key: key.to_string(),
                 ..Default::default()
@@ -476,9 +455,8 @@ impl<'db> Tx<'db> {
             // Increment the number of flushes. The background syncing uses this.
             db.flushes += 1;
         }
-        // Unlock the database and allow for another writable transaction.
-        self.unlock();
         // Clear the db field to disable this transaction from future use.
+        // Unlock the database and allow for another writable transaction.
         self.db_lock.take();
         Ok(())
     }
@@ -499,8 +477,7 @@ impl<'db> Tx<'db> {
         if self.writable {
             self.rollback_inner();
         }
-        self.unlock();
-        // Clear the db field to disable this transaction from future use.
+        // Clear the db field to disable this transaction from future use
         self.db_lock.take();
         Ok(())
     }
@@ -1126,13 +1103,5 @@ impl<'db> Tx<'db> {
 
         let db = self.db_lock.as_ref().unwrap().as_ref();
         Ok(db.keys.count())
-    }
-}
-
-impl<'db> Drop for Tx<'db> {
-    fn drop(&mut self) {
-        if self.db_lock.is_some() && self.has_lock {
-            self.unlock();
-        }
     }
 }
