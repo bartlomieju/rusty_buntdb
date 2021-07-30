@@ -4,9 +4,9 @@
 //! dependable database, and favor speed over data size.
 
 use btreec::BTreeC;
-use parking_lot::lock_api::RawRwLock as _;
-use parking_lot::RawRwLock;
 use parking_lot::RwLock;
+use parking_lot::RwLockReadGuard;
+use parking_lot::RwLockWriteGuard;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::error::Error;
@@ -95,8 +95,29 @@ impl fmt::Display for DbError {
 
 impl Error for DbError {}
 
+pub(crate) enum DbLock<'db> {
+    Read(RwLockReadGuard<'db, DbInner>),
+    Write(RwLockWriteGuard<'db, DbInner>),
+}
+
+impl<'db> DbLock<'db> {
+    fn as_ref(&self) -> &DbInner {
+        match self {
+            DbLock::Read(g) => &g,
+            DbLock::Write(g) => &g,
+        }
+    }
+
+    fn as_mut(&mut self) -> &mut DbInner {
+        match self {
+            DbLock::Read(_) => panic!("read-only transaction as_mut()"),
+            DbLock::Write(g) => g,
+        }
+    }
+}
+
 #[allow(unused)]
-pub struct DbInner {
+pub(crate) struct DbInner {
     /// the underlying file
     file: Option<File>,
 
@@ -128,59 +149,118 @@ pub struct DbInner {
     persist: bool,
 
     /// when an aof shrink is in-process.
-    
     shrinking: bool,
 
     /// the size of the last shrink aof size
     lastaofsz: u64,
 }
 
-pub struct Db(Arc<RwLock<DbInner>>);
+impl DbInner {
+    /// get return an item or nil if not found.
+    pub fn get(&self, key: String) -> Option<&DbItem> {
+        self.keys.get(DbItem {
+            key,
+            ..Default::default()
+        })
+    }
+
+    // TODO: should be a method on `DbInner`
+    /// insertIntoDatabase performs inserts an item in to the database and updates
+    /// all indexes. If a previous item with the same key already exists, that item
+    /// will be replaced with the new one, and return the previous item.
+    pub(crate) fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
+        // Generate a list of indexes that this item will be inserted into
+        let mut ins_idxs = vec![];
+        for (_, idx) in self.idxs.iter_mut() {
+            if idx.matches(&item.key) {
+                ins_idxs.push(idx);
+            }
+        }
+
+        let maybe_prev = self.keys.set(item.clone()).map(|p| p.to_owned());
+        if let Some(prev) = &maybe_prev {
+            // A previous item was removed from the keys tree. Let's
+            // full delete this item from all indexes.
+            if let Some(opts) = &prev.opts {
+                if opts.ex {
+                    self.exps.delete(prev.clone());
+                }
+            }
+            for idx in ins_idxs.iter_mut() {
+                if let Some(btr) = idx.btr.as_mut() {
+                    // Remove it from the btree index
+                    btr.delete(item.clone());
+                }
+                //     if let Some(rtr) = idx.rtr.as_mut() {
+                //         // Remove it from the rtree index
+                //         rtr.delete()
+                //     }
+            }
+        }
+        if let Some(opts) = &item.opts {
+            if opts.ex {
+                // The new item has eviction options. Add it to the
+                // expires tree.
+                self.exps.set(item.clone());
+            }
+        }
+        for idx in ins_idxs.drain(..) {
+            if let Some(btr) = idx.btr.as_mut() {
+                // Remove it from the btree index
+                btr.set(item.clone());
+            }
+            // TODO:
+            // if let Some(rtr) = idx.rtr.as_mut() {
+            //     // Remove it from the rtree index
+            //     rtr.set(item.clone())
+            // }
+        }
+
+        // we must return previous item to the caller
+        maybe_prev
+    }
+
+    /// deleteFromDatabase removes and item from the database and indexes. The input
+    /// item must only have the key field specified thus "&dbItem{key: key}" is all
+    /// that is needed to fully remove the item with the matching key. If an item
+    /// with the matching key was found in the database, it will be removed and
+    /// returned to the caller. A nil return value means that the item was not
+    /// found in the database
+    pub fn delete_from_database(&mut self, item: DbItem) -> Option<DbItem> {
+        let maybe_prev = self.keys.delete(item.clone()).map(|p| p.to_owned());
+
+        if let Some(prev) = &maybe_prev {
+            if let Some(opts) = &prev.opts {
+                if opts.ex {
+                    // Remove it from the expires tree.
+                    self.exps.delete(prev.clone());
+                }
+            }
+            for (_, idx) in self.idxs.iter_mut() {
+                if !idx.matches(&item.key) {
+                    continue;
+                }
+                if let Some(btr) = idx.btr.as_mut() {
+                    // Remove it from the btree index
+                    btr.delete(prev.clone());
+                }
+                // TODO:
+                //     if let Some(rtr) = idx.rtr.as_mut() {
+                //         // Remove it from the rtree index
+                //         rtr.delete()
+                //     }
+            }
+        }
+
+        maybe_prev
+    }
+}
 
 /// Db represents a collection of key-value pairs that persist on disk.
 /// Transactions are used for all forms of data access to the Db.
-// pub struct Db {
-//     /// the gatekeeper for all fields
-//     mu: RawRwLock,
+#[derive(Clone)]
 
-//     /// the underlying file
-//     file: Option<File>,
-
-//     /// a buffer to write to
-//     buf: Vec<u8>,
-
-//     /// a tree of all item ordered by key
-//     keys: BTreeC<DbItem>,
-
-//     /// a tree of items ordered by expiration
-//     exps: BTreeC<DbItem>,
-
-//     /// the index trees.
-//     idxs: HashMap<String, Index>,
-
-//     /// a reuse buffer for gathering indexes
-//     #[allow(unused)]
-//     ins_idxs: Vec<Index>,
-
-//     /// a count of the number of disk flushes
-//     flushes: i64,
-
-//     /// set when the database has been closed
-//     closed: bool,
-
-//     /// the database configuration
-//     config: Config,
-
-//     /// do we write to disk
-//     persist: bool,
-
-//     /// when an aof shrink is in-process.
-//     #[allow(unused)]
-//     shrinking: bool,
-
-//     /// the size of the last shrink aof size
-//     lastaofsz: u64,
-// }
+pub struct Db(Arc<RwLock<DbInner>>);
 
 /// SyncPolicy represents how often data is synced to disk.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -281,7 +361,6 @@ impl Db {
         };
 
         let mut inner = DbInner {
-            // mu: RawRwLock::INIT,
             file: None,
             buf: Vec::new(),
             keys: BTreeC::new(Box::new(keys_compare_fn)),
@@ -324,7 +403,7 @@ impl Db {
     /// `close` releases all database resources.
     /// All transactions must be closed before closing the database.
     pub fn close(&mut self) -> Result<(), DbError> {
-        let db = self.0.write();
+        let mut db = self.0.write();
 
         if db.closed {
             return Err(DbError::DatabaseClosed);
@@ -408,7 +487,7 @@ impl Db {
     /// SET.
     #[allow(unused)]
     fn load_from_disk(&mut self) -> Result<(), io::Error> {
-        let db = self.0.write();
+        let mut db = self.0.write();
         let mut file = &(*db.file.as_ref().unwrap());
         let metadata = file.metadata()?;
         let mod_time = metadata.modified()?;
@@ -569,108 +648,12 @@ impl Db {
 
     /// SetConfig updates the database configuration.
     pub fn set_config(&mut self, config: Config) -> Result<(), DbError> {
-        let db = self.0.write();
+        let mut db = self.0.write();
         if db.closed {
             return Err(DbError::DatabaseClosed);
         }
         db.config = config;
         Ok(())
-    }
-
-    // TODO: should be a method on `DbInner`
-    /// insertIntoDatabase performs inserts an item in to the database and updates
-    /// all indexes. If a previous item with the same key already exists, that item
-    /// will be replaced with the new one, and return the previous item.
-    pub(crate) fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
-        todo!();
-
-        // Generate a list of indexes that this item will be inserted into
-        // let mut ins_idxs = vec![];
-        // for (_, idx) in self.idxs.iter_mut() {
-        //     if idx.matches(&item.key) {
-        //         ins_idxs.push(idx);
-        //     }
-        // }
-
-        // let maybe_prev = self.keys.set(item.clone()).map(|p| p.to_owned());
-        // if let Some(prev) = &maybe_prev {
-        //     // A previous item was removed from the keys tree. Let's
-        //     // full delete this item from all indexes.
-        //     if let Some(opts) = &prev.opts {
-        //         if opts.ex {
-        //             self.exps.delete(prev.clone());
-        //         }
-        //     }
-        //     for idx in ins_idxs.iter_mut() {
-        //         if let Some(btr) = idx.btr.as_mut() {
-        //             // Remove it from the btree index
-        //             btr.delete(item.clone());
-        //         }
-        //         //     if let Some(rtr) = idx.rtr.as_mut() {
-        //         //         // Remove it from the rtree index
-        //         //         rtr.delete()
-        //         //     }
-        //     }
-        // }
-        // if let Some(opts) = &item.opts {
-        //     if opts.ex {
-        //         // The new item has eviction options. Add it to the
-        //         // expires tree.
-        //         self.exps.set(item.clone());
-        //     }
-        // }
-        // for idx in ins_idxs.drain(..) {
-        //     if let Some(btr) = idx.btr.as_mut() {
-        //         // Remove it from the btree index
-        //         btr.set(item.clone());
-        //     }
-        //     // TODO:
-        //     // if let Some(rtr) = idx.rtr.as_mut() {
-        //     //     // Remove it from the rtree index
-        //     //     rtr.set(item.clone())
-        //     // }
-        // }
-
-        // // we must return previous item to the caller
-        // maybe_prev
-    }
-
-    // TODO: should be a method on `DbInner`
-    /// deleteFromDatabase removes and item from the database and indexes. The input
-    /// item must only have the key field specified thus "&dbItem{key: key}" is all
-    /// that is needed to fully remove the item with the matching key. If an item
-    /// with the matching key was found in the database, it will be removed and
-    /// returned to the caller. A nil return value means that the item was not
-    /// found in the database
-    pub fn delete_from_database(&mut self, item: DbItem) -> Option<DbItem> {
-        todo!();
-
-        // let maybe_prev = self.keys.delete(item.clone()).map(|p| p.to_owned());
-
-        // if let Some(prev) = &maybe_prev {
-        //     if let Some(opts) = &prev.opts {
-        //         if opts.ex {
-        //             // Remove it from the expires tree.
-        //             self.exps.delete(prev.clone());
-        //         }
-        //     }
-        //     for (_, idx) in self.idxs.iter_mut() {
-        //         if !idx.matches(&item.key) {
-        //             continue;
-        //         }
-        //         if let Some(btr) = idx.btr.as_mut() {
-        //             // Remove it from the btree index
-        //             btr.delete(prev.clone());
-        //         }
-        //         // TODO:
-        //         //     if let Some(rtr) = idx.rtr.as_mut() {
-        //         //         // Remove it from the rtree index
-        //         //         rtr.delete()
-        //         //     }
-        //     }
-        // }
-
-        // maybe_prev
     }
 
     // Returns true if database has been closed.
@@ -849,15 +832,6 @@ impl Db {
         self.managed(true, func)
     }
 
-    /// get return an item or nil if not found.
-    pub fn get(&self, key: String) -> Option<&DbItem> {
-        let db = self.0.read();
-        db.keys.get(DbItem {
-            key,
-            ..Default::default()
-        })
-    }
-
     // Begin opens a new transaction.
     // Multiple read-only transactions can be opened at the same time but there can
     // only be one read/write transaction at a time. Attempting to open a read/write
@@ -865,8 +839,13 @@ impl Db {
     // the current read/write transaction is completed.
     //
     // All transactions must be closed by calling Commit() or Rollback() when done.
-    fn begin(&mut self, writable: bool) -> Result<Tx, DbError> {
-        Tx::new(self, writable)
+    fn begin(&self, writable: bool) -> Result<Tx, DbError> {
+        let db_lock = if writable {
+            DbLock::Write(self.0.write())
+        } else {
+            DbLock::Read(self.0.read())
+        };
+        Tx::new(db_lock, writable)
     }
 }
 
@@ -1312,7 +1291,7 @@ mod tests {
         assert_eq!(val, "planet");
 
         db.update(|tx| {
-            let saved_db = tx.db.take().unwrap();
+            let saved_db = tx.db_lock.take().unwrap();
             let e = tx
                 .set("hello".to_string(), "planet".to_string(), None)
                 .unwrap_err();
@@ -1322,7 +1301,7 @@ mod tests {
             let e = tx.get("hello".to_string(), true).unwrap_err();
             assert_eq!(e, DbError::TxClosed);
 
-            tx.db = Some(saved_db);
+            tx.db_lock = Some(saved_db);
             tx.writable = false;
             let e = tx
                 .set("hello".to_string(), "planet".to_string(), None)
@@ -1378,12 +1357,12 @@ mod tests {
         // test fo closed transactions
         let err = db
             .update(|tx| {
-                tx.db = None;
+                tx.db_lock = None;
                 Ok(())
             })
             .unwrap_err();
         assert_eq!(err, DbError::TxClosed);
-        unsafe { db.mu.unlock_exclusive() };
+        // unsafe { db.mu.unlock_exclusive() };
 
         // test for invalid writes
 

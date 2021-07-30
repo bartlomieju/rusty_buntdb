@@ -2,7 +2,6 @@ use btreec::BTreeC;
 use std::cmp::Ordering;
 
 use crate::item::DbItem;
-use crate::Db;
 use crate::LessFn;
 use crate::RectFn;
 

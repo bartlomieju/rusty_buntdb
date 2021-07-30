@@ -1,5 +1,4 @@
 use btreec::BTreeC;
-use parking_lot::lock_api::RawRwLock as _;
 use std::collections::HashMap;
 use std::io;
 use std::io::Write;
@@ -12,8 +11,8 @@ use crate::index::IndexOptions;
 use crate::item::DbItem;
 use crate::item::DbItemOpts;
 use crate::keys_compare_fn;
-use crate::Db;
 use crate::DbError;
+use crate::DbLock;
 use crate::LessFn;
 use crate::RectFn;
 use crate::SetOptions;
@@ -25,13 +24,9 @@ use crate::SyncPolicy;
 // transactions can set and delete keys.
 //
 // All transactions must be committed or rolled-back when done.
-// TODO: this lifetime makes no sense - we clear db option when transaction
-// is no longer valid - it should be an arc<mutex<>> or something like this
 pub struct Tx<'db> {
-    /// the underlying database.
-    pub db: Option<Db>,
+    pub(crate) db_lock: Option<DbLock<'db>>,
 
-    // pub db: Option<&'db mut Db>,
     /// are we currently holding DB lock?
     has_lock: bool,
     /// when false mutable operations fail.
@@ -64,18 +59,16 @@ pub struct TxWriteContext {
 }
 
 impl<'db> Tx<'db> {
-    pub fn new(db: &'db mut Db, writable: bool) -> Result<Self, DbError> {
+    pub(crate) fn new(db_lock: DbLock<'db>, writable: bool) -> Result<Self, DbError> {
         let mut tx = Tx {
-            db: Some(db),
-            has_lock: false,
+            db_lock: Some(db_lock),
+            has_lock: true,
             writable,
             funcd: false,
             wc: None,
         };
 
-        tx.lock();
-
-        if tx.db.as_ref().unwrap().closed {
+        if tx.db_lock.as_ref().unwrap().as_ref().closed {
             tx.unlock();
             return Err(DbError::DatabaseClosed);
         }
@@ -99,7 +92,7 @@ impl<'db> Tx<'db> {
 
     // DeleteAll deletes all items from the database.
     pub fn delete_all(&mut self) -> Result<(), DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         } else if !self.writable {
             return Err(DbError::TxNotWritable);
@@ -107,8 +100,8 @@ impl<'db> Tx<'db> {
             return Err(DbError::TxIterating);
         }
 
-        let db = self.db.as_mut().unwrap();
         let wc = self.wc.as_mut().unwrap();
+        let db = self.db_lock.as_mut().unwrap().as_mut();
 
         // now reset the live database trees
         let old_keys = std::mem::replace(&mut db.keys, BTreeC::new(Box::new(keys_compare_fn)));
@@ -135,11 +128,11 @@ impl<'db> Tx<'db> {
     }
 
     pub fn indexes(&self) -> Result<Vec<String>, DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }
 
-        let db = self.db.as_ref().unwrap();
+        let db = self.db_lock.as_ref().unwrap().as_ref();
         let mut names = db
             .idxs
             .keys()
@@ -159,7 +152,7 @@ impl<'db> Tx<'db> {
         rect: Option<RectFn>,
         opts: Option<IndexOptions>,
     ) -> Result<(), DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         } else if !self.writable {
             return Err(DbError::TxNotWritable);
@@ -173,7 +166,7 @@ impl<'db> Tx<'db> {
             return Err(DbError::IndexExists);
         }
 
-        let db = self.db.as_mut().unwrap();
+        let db = self.db_lock.as_mut().unwrap().as_mut();
         let wc = self.wc.as_mut().unwrap();
 
         // check if an index with that name already exists
@@ -213,7 +206,7 @@ impl<'db> Tx<'db> {
         }
 
         let mut idx = Index::new(name, pattern, less, rect, options);
-        idx.rebuild(db);
+        idx.rebuild(&db.keys);
         // store the index in the rollback map.
         if wc.rbkeys.is_none() {
             // store the index in the rollback map
@@ -301,7 +294,7 @@ impl<'db> Tx<'db> {
     }
 
     pub fn drop_index(&mut self, name: String) -> Result<(), DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         } else if !self.writable {
             return Err(DbError::TxNotWritable);
@@ -315,7 +308,7 @@ impl<'db> Tx<'db> {
         }
 
         let wc = self.wc.as_mut().unwrap();
-        let db = self.db.as_mut().unwrap();
+        let db = self.db_lock.as_mut().unwrap().as_mut();
         if !db.idxs.contains_key(&name) {
             return Err(DbError::NotFound);
         }
@@ -336,24 +329,20 @@ impl<'db> Tx<'db> {
     }
 
     // lock locks the database based on the transaction type.
-    pub fn lock(&mut self) {
-        let db = self.db.as_ref().unwrap();
-        if self.writable {
-            db.mu.lock_exclusive();
-        } else {
-            db.mu.lock_shared();
-        }
-        self.has_lock = true;
-    }
+    // pub fn lock(&mut self) {
+    //     let db = self.db.clone().unwrap();
+    //     let db_lock = if self.writable {
+    //         DbLock::Write(db.0.write())
+    //     } else {
+    //         DbLock::Read(db.0.read())
+    //     };
+    //     self.db_lock = Some(db_lock);
+    //     self.has_lock = true;
+    // }
 
     // unlock unlocks the database based on the transaction type.
     pub fn unlock(&mut self) {
-        let db = self.db.as_ref().unwrap();
-        if self.writable {
-            unsafe { db.mu.unlock_exclusive() };
-        } else {
-            unsafe { db.mu.unlock_shared() };
-        }
+        self.db_lock.take();
         self.has_lock = false;
     }
 
@@ -362,7 +351,7 @@ impl<'db> Tx<'db> {
     fn rollback_inner(&mut self) {
         // rollback the deleteAll if needed
         let wc = self.wc.as_mut().unwrap();
-        let db = self.db.as_mut().unwrap();
+        let db = self.db_lock.as_mut().unwrap().as_mut();
 
         if wc.rbkeys.is_some() {
             db.keys = wc.rbkeys.take().unwrap();
@@ -389,7 +378,7 @@ impl<'db> Tx<'db> {
                 // this could an expensive process if the database has many
                 // items or the index is complex.
                 eprintln!("rebuilding index {}", name);
-                idx.rebuild(db);
+                idx.rebuild(&db.keys);
                 db.idxs.insert(name, idx);
             }
         }
@@ -403,13 +392,13 @@ impl<'db> Tx<'db> {
             panic!("managed tx rollback not allowed");
         }
 
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         } else if !self.writable {
             return Err(DbError::TxNotWritable);
         }
 
-        let db = self.db.as_mut().unwrap();
+        let db = self.db_lock.as_mut().unwrap().as_mut();
         let wc = self.wc.as_mut().unwrap();
         if db.persist && (!wc.commit_items.is_empty() || wc.rbkeys.is_some()) {
             db.buf.clear();
@@ -476,7 +465,7 @@ impl<'db> Tx<'db> {
                 }
             }
 
-            let db = self.db.as_mut().unwrap();
+            let db = self.db_lock.as_mut().unwrap().as_mut();
             let file = db.file.as_mut().unwrap();
 
             if db.config.sync_policy == SyncPolicy::Always {
@@ -489,7 +478,7 @@ impl<'db> Tx<'db> {
         // Unlock the database and allow for another writable transaction.
         self.unlock();
         // Clear the db field to disable this transaction from future use.
-        self.db = None;
+        self.db_lock.take();
         Ok(())
     }
 
@@ -502,7 +491,7 @@ impl<'db> Tx<'db> {
             panic!("managed tx rollback not allowed");
         }
 
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }
         // The rollback func does the heavy lifting.
@@ -511,7 +500,7 @@ impl<'db> Tx<'db> {
         }
         self.unlock();
         // Clear the db field to disable this transaction from future use.
-        self.db = None;
+        self.db_lock.take();
         Ok(())
     }
 
@@ -520,11 +509,11 @@ impl<'db> Tx<'db> {
     // Returns ErrNotFound if the index is not found or there is no less
     // function bound to the index
     fn get_less(&self, index: String) -> Result<LessFn, DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }
 
-        let db = self.db.as_ref().unwrap();
+        let db = self.db_lock.as_ref().unwrap().as_ref();
         if let Some(idx) = db.idxs.get(&index) {
             if let Some(less_fn) = idx.less.clone() {
                 return Ok(less_fn);
@@ -561,7 +550,7 @@ impl<'db> Tx<'db> {
         set_opts: Option<SetOptions>,
         // TODO: could probably return Option<String> instead
     ) -> Result<(Option<String>, bool), DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         } else if !self.writable {
             return Err(DbError::TxNotWritable);
@@ -588,7 +577,7 @@ impl<'db> Tx<'db> {
         }
 
         // Insert the item into the keys tree.
-        let db = self.db.as_mut().unwrap();
+        let db = self.db_lock.as_mut().unwrap().as_mut();
         let wc = self.wc.as_mut().unwrap();
         let maybe_prev = db.insert_into_database(item.clone());
 
@@ -633,10 +622,10 @@ impl<'db> Tx<'db> {
     // has expired then ErrNotFound is returned. If ignoreExpired is true, then
     // the found value will be returned even if it is expired.
     pub fn get(&mut self, key: String, ignore_expired: bool) -> Result<String, DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }
-        let maybe_item = self.db.as_ref().unwrap().get(key);
+        let maybe_item = self.db_lock.as_ref().unwrap().as_ref().get(key);
 
         match maybe_item {
             None => Err(DbError::NotFound),
@@ -657,7 +646,7 @@ impl<'db> Tx<'db> {
     // Only a writable transaction can be used for this operation.
     // This operation is not allowed during iterations such as Ascend* & Descend*.
     pub fn delete(&mut self, key: String) -> Result<String, DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         } else if !self.writable {
             return Err(DbError::TxNotWritable);
@@ -666,7 +655,7 @@ impl<'db> Tx<'db> {
         }
 
         let wc = self.wc.as_mut().unwrap();
-        let db = self.db.as_mut().unwrap();
+        let db = self.db_lock.as_mut().unwrap().as_mut();
         let maybe_item = db.delete_from_database(DbItem {
             key: key.to_string(),
             ..Default::default()
@@ -697,10 +686,10 @@ impl<'db> Tx<'db> {
     // A negative duration will be returned for items that do not have an
     // expiration.
     pub fn ttl(&mut self, key: String) -> Result<Option<time::Duration>, DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }
-        let db = self.db.as_ref().unwrap();
+        let db = self.db_lock.as_ref().unwrap().as_ref();
         let maybe_item = db.get(key);
         match maybe_item {
             None => Err(DbError::NotFound),
@@ -744,11 +733,11 @@ impl<'db> Tx<'db> {
     where
         F: FnMut(&str, &str) -> bool,
     {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }
 
-        let db = self.db.as_ref().unwrap();
+        let db = self.db_lock.as_ref().unwrap().as_ref();
         let tr;
 
         if index.is_empty() {
@@ -1130,18 +1119,18 @@ impl<'db> Tx<'db> {
 
     // Len returns the number of items in the database
     pub fn len(&self) -> Result<u64, DbError> {
-        if self.db.is_none() {
+        if self.db_lock.is_none() {
             return Err(DbError::TxClosed);
         }
 
-        let db = self.db.as_ref().unwrap();
+        let db = self.db_lock.as_ref().unwrap().as_ref();
         Ok(db.keys.count())
     }
 }
 
 impl<'db> Drop for Tx<'db> {
     fn drop(&mut self) {
-        if self.db.is_some() && self.has_lock {
+        if self.db_lock.is_some() && self.has_lock {
             self.unlock();
         }
     }
