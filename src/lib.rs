@@ -14,6 +14,7 @@ use std::fmt;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::sync::Arc;
 use std::time;
 
@@ -26,6 +27,8 @@ use item::DbItem;
 use item::DbItemOpts;
 mod btree_helpers;
 use btree_helpers::btree_ascend_less_than;
+
+use crate::btree_helpers::btree_ascend_greater_or_equal;
 
 type RectFn = dyn Fn(String) -> (Vec<f64>, Vec<f64>) + Send + Sync;
 type LessFn = dyn Fn(&str, &str) -> bool + Send + Sync;
@@ -782,10 +785,132 @@ impl Db {
         })
     }
 
+    // TODO: this functions uses to much `.unwrap()` and `expect()`, should
+    // be rewritten to handle errors gracefully.
     /// Shrink will make the database file smaller by removing redundant
     /// log entries. This operation does not block the database.
     fn shrink(&mut self) -> Result<(), DbError> {
-        todo!()
+        let mut db = self.0.write();
+
+        if db.closed {
+            return Err(DbError::DatabaseClosed);
+        }
+
+        if !db.persist {
+            // The database was opened with ":memory:" as the path.
+            // There is no persistence, and no need to do anything here.
+            return Ok(());
+        }
+
+        if db.shrinking {
+            // The database is already in the process of shrinking.
+            return Err(DbError::ShrinkInProcess);
+        }
+
+        db.shrinking = true;
+
+        let file_name = "";
+        let tmp_file_name = format!("{}.tmp", file_name);
+        // the endpos is used to return to the end of the file when we are
+        // finished writing all of the current items.
+        use std::io::Seek;
+        let endpos = db
+            .file
+            .as_mut()
+            .unwrap()
+            .seek(io::SeekFrom::End(0))
+            .expect("Failed to seek db file.");
+
+        drop(db);
+        // wait just a bit before starting
+        std::thread::sleep(time::Duration::from_millis(250));
+
+        let mut temp_file =
+            std::fs::File::create(&tmp_file_name).expect("Failed to create database file");
+
+        // we are going to read items in as chunks as to not hold up the database
+        // for too long.
+        let mut buf = Vec::new();
+        let mut pivot_key = "".to_string();
+        let mut done = false;
+
+        while !done {
+            let db = self.0.read();
+            if db.closed {
+                return Err(DbError::DatabaseClosed);
+            }
+            done = true;
+            let mut n = 0;
+            let pivot_item = DbItem {
+                key: pivot_key.to_string(),
+                ..Default::default()
+            };
+            // TODO: extraneous DB lookup because iterator is using (key, value) instead of item ref
+            btree_ascend_greater_or_equal(&db.keys, Some(pivot_item), |k, _v| {
+                // 1000 items or 64MB buffer
+                if n > 1000 || buf.len() > 64 * 1024 * 1024 {
+                    pivot_key = k.to_string();
+                    done = false;
+                    return false;
+                }
+                let item = db.get(k.to_string()).unwrap();
+                item.write_set_to(&mut buf);
+                n += 1;
+                true
+            });
+            if !buf.is_empty() {
+                temp_file
+                    .write_all(&buf)
+                    .expect("Failed to write to temporary db file");
+                buf.clear();
+            }
+        }
+
+        // We reached this far so all of the items have been written to a new tmp
+        // There's some more work to do by appending the new line from the aof
+        // to the tmp file and finally swap the files out.
+        {
+            let mut db = self.0.write();
+            if db.closed {
+                return Err(DbError::DatabaseClosed);
+            }
+            // We are going to open a new version of the aof file so that we do
+            // not change the seek position of the previous. This may cause a
+            // problem in the future if we choose to use syscall file locking.
+            let mut aof = std::fs::File::open(file_name).expect("Failed to open AOF db file");
+            aof.seek(io::SeekFrom::Start(endpos))
+                .expect("Failed to seek AOF db file");
+            // Just copy all of the new command that have ocurred since we started the shrink process.
+            std::io::copy(&mut aof, &mut temp_file).expect("Failed to sync tmp and AOF file");
+            // Close all files
+            drop(aof);
+            drop(temp_file);
+            drop(db.file.take());
+            // Any failures below here is really bad. So just panic.
+            std::fs::rename(&tmp_file_name, file_name).expect("Failed to rename tmp DB file");
+            let db_file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(file_name)
+                .expect("Failed to open new DB file");
+            db.file = Some(db_file);
+            let pos = db
+                .file
+                .as_mut()
+                .unwrap()
+                .seek(io::SeekFrom::End(0))
+                .expect("Failed to seek new DB file");
+            db.lastaofsz = pos;
+        }
+
+        let _ = std::fs::remove_file(&tmp_file_name);
+        {
+            let mut db = self.0.write();
+            db.shrinking = false;
+        }
+
+        Ok(())
     }
 
     /// managed calls a block of code that is fully contained in a transaction.
