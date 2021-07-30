@@ -305,11 +305,11 @@ pub struct Config {
     // For example, if this value is 100, and the last shrink process
     // resulted in a 100mb file, then the new aof file must be 200mb before
     // a shrink is triggered.
-    auto_shrink_percentage: i64,
+    auto_shrink_percentage: u64,
 
     // `auto_shrink_min_size` defines the minimum size of the aof file before
     // an automatic shrink can occur.
-    auto_shrink_min_size: i64,
+    auto_shrink_min_size: u64,
 
     // auto_shrink_disabled turns off automatic background shrinking
     auto_shrink_disabled: bool,
@@ -669,7 +669,7 @@ impl Db {
         // Open a standard view. This will take a full lock of the
         // database thus allowing for access to anything we need.
         let update_result = self.update(|tx| {
-            let db = tx.db_lock.as_ref().unwrap().as_ref();
+            let mut db = tx.db_lock.as_mut().unwrap().as_mut();
             on_expired = db.config.on_expired.clone();
 
             if on_expired.is_none() {
@@ -677,7 +677,20 @@ impl Db {
             }
 
             if db.persist && !db.config.auto_shrink_disabled {
-                // TODO:
+                use std::io::Seek;
+                let aofsz = db
+                    .file
+                    .as_mut()
+                    .unwrap()
+                    .seek(io::SeekFrom::Current(0))
+                    .expect("Failed to get current file position");
+
+                if aofsz > db.config.auto_shrink_min_size {
+                    let prc: f64 = db.config.auto_shrink_percentage as f64 / 100.0;
+                    let prcsz = db.lastaofsz as f64 * prc;
+                    let prcsz = ((prcsz / 100_000.0).round() as u64) * 100_000;
+                    shrink = aofsz > db.lastaofsz + prcsz;
+                }
             }
 
             // produce a list of expired items that need removing
@@ -771,7 +784,6 @@ impl Db {
 
     /// Shrink will make the database file smaller by removing redundant
     /// log entries. This operation does not block the database.
-    #[allow(unused)]
     fn shrink(&mut self) -> Result<(), DbError> {
         todo!()
     }
