@@ -4,8 +4,9 @@
 //! dependable database, and favor speed over data size.
 
 use btreec::BTreeC;
-use parking_lot::lock_api::RawRwLock as _;
-use parking_lot::RawRwLock;
+use parking_lot::RwLock;
+use parking_lot::RwLockReadGuard;
+use parking_lot::RwLockWriteGuard;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::error::Error;
@@ -13,21 +14,24 @@ use std::fmt;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::sync::Arc;
 use std::time;
 
-mod tx;
-use tx::*;
-mod index;
-use index::*;
-mod item;
-use item::DbItem;
-use item::DbItemOpts;
 mod btree_helpers;
-use btree_helpers::btree_ascend_less_than;
+mod index;
+mod item;
+mod tx;
 
-type RectFn = Arc<dyn Fn(String) -> (Vec<f64>, Vec<f64>)>;
-type LessFn = Arc<dyn Fn(&str, &str) -> bool>;
+use crate::btree_helpers::btree_ascend_greater_or_equal;
+use crate::btree_helpers::btree_ascend_less_than;
+use crate::index::*;
+use crate::item::DbItem;
+use crate::item::DbItemOpts;
+use crate::tx::*;
+
+type RectFn = dyn Fn(String) -> (Vec<f64>, Vec<f64>) + Send + Sync;
+type LessFn = dyn Fn(&str, &str) -> bool + Send + Sync;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DbError {
@@ -94,12 +98,28 @@ impl fmt::Display for DbError {
 
 impl Error for DbError {}
 
-/// Db represents a collection of key-value pairs that persist on disk.
-/// Transactions are used for all forms of data access to the Db.
-pub struct Db {
-    /// the gatekeeper for all fields
-    mu: RawRwLock,
+pub(crate) enum DbLock<'db> {
+    Read(RwLockReadGuard<'db, DbInner>),
+    Write(RwLockWriteGuard<'db, DbInner>),
+}
 
+impl<'db> DbLock<'db> {
+    fn as_ref(&self) -> &DbInner {
+        match self {
+            DbLock::Read(g) => &g,
+            DbLock::Write(g) => &g,
+        }
+    }
+
+    fn as_mut(&mut self) -> &mut DbInner {
+        match self {
+            DbLock::Read(_) => panic!("read-only transaction as_mut()"),
+            DbLock::Write(g) => g,
+        }
+    }
+}
+
+pub(crate) struct DbInner {
     /// the underlying file
     file: Option<File>,
 
@@ -115,6 +135,7 @@ pub struct Db {
     /// the index trees.
     idxs: HashMap<String, Index>,
 
+    // TODO: use me
     /// a reuse buffer for gathering indexes
     #[allow(unused)]
     ins_idxs: Vec<Index>,
@@ -132,420 +153,25 @@ pub struct Db {
     persist: bool,
 
     /// when an aof shrink is in-process.
-    #[allow(unused)]
     shrinking: bool,
 
     /// the size of the last shrink aof size
     lastaofsz: u64,
 }
 
-/// SyncPolicy represents how often data is synced to disk.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SyncPolicy {
-    /// Never is used to disable syncing data to disk.
-    /// The faster and less safe method.
-    Never,
-
-    /// EverySecond is used to sync data to disk every second.
-    /// It's pretty fast and you can lose 1 second of data if there
-    /// is a disaster.
-    /// This is the recommended setting.
-    EverySecond,
-
-    /// Always is used to sync data after every write to disk.
-    /// Slow. Very safe.
-    Always,
-}
-
-impl Default for SyncPolicy {
-    fn default() -> Self {
-        Self::EverySecond
-    }
-}
-
-pub type OnExpiredFn = &'static dyn for<'e> Fn(Vec<String>);
-pub type OnExpiredSyncFn = &'static dyn for<'e> Fn(String, String, &mut Tx) -> Result<(), DbError>;
-
-// Config represents database configuration options. These
-// options are used to change various behaviors of the database.
-#[derive(Clone, Default)]
-pub struct Config {
-    // SyncPolicy adjusts how often the data is synced to disk.
-    // This value can be Never, EverySecond, or Always.
-    // The default is EverySecond.
-    sync_policy: SyncPolicy,
-
-    // `auto_shrink_percentage` is used by the background process to trigger
-    // a shrink of the aof file when the size of the file is larger than the
-    // percentage of the result of the previous shrunk file.
-    // For example, if this value is 100, and the last shrink process
-    // resulted in a 100mb file, then the new aof file must be 200mb before
-    // a shrink is triggered.
-    auto_shrink_percentage: i64,
-
-    // `auto_shrink_min_size` defines the minimum size of the aof file before
-    // an automatic shrink can occur.
-    auto_shrink_min_size: i64,
-
-    // auto_shrink_disabled turns off automatic background shrinking
-    auto_shrink_disabled: bool,
-
-    // `on_expired` is used to custom handle the deletion option when a key
-    // has been expired.
-    on_expired: Option<OnExpiredFn>,
-
-    // `on_expired_sync` will be called inside the same transaction that is
-    // performing the deletion of expired items. If OnExpired is present then
-    // this callback will not be called. If this callback is present, then the
-    // deletion of the timeed-out item is the explicit responsibility of this
-    // callback.
-    on_expired_sync: Option<OnExpiredSyncFn>,
-}
-
-fn keys_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
-    if a.keyless {
-        return Ordering::Less;
-    } else if b.keyless {
-        return Ordering::Greater;
-    }
-    a.key.cmp(&b.key)
-}
-
-fn exps_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
-    // The expires b-tree formula
-    if b.expires_at() > a.expires_at() {
-        return Ordering::Greater;
-    }
-    if a.expires_at() > b.expires_at() {
-        return Ordering::Less;
-    }
-
-    if a.keyless {
-        return Ordering::Less;
-    } else if b.keyless {
-        return Ordering::Greater;
-    }
-    a.key.cmp(&b.key)
-}
-
-impl Db {
-    pub fn open(path: &str) -> Result<Db, io::Error> {
-        // initialize default configuration
-        let config = Config {
-            auto_shrink_percentage: 100,
-            auto_shrink_min_size: 32 * 1024 * 1024,
+impl DbInner {
+    /// get return an item or nil if not found.
+    pub fn get(&self, key: String) -> Option<&DbItem> {
+        self.keys.get(DbItem {
+            key,
             ..Default::default()
-        };
-
-        let mut db = Db {
-            mu: RawRwLock::INIT,
-            file: None,
-            buf: Vec::new(),
-            keys: BTreeC::new(Box::new(keys_compare_fn)),
-            exps: BTreeC::new(Box::new(exps_compare_fn)),
-            idxs: HashMap::new(),
-            ins_idxs: Vec::new(),
-            flushes: 0,
-            closed: false,
-            config,
-            persist: path != ":memory:",
-            shrinking: false,
-            lastaofsz: 0,
-        };
-
-        if db.persist {
-            // hardcoding 0666 as the default mode.
-            let file = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .open(path)?;
-            db.file = Some(file);
-
-            // load the database from disk
-            // TODO:
-            // if let Err(err) = db.load_from_disk() {
-            //     // close on error, ignore close error
-            //     db.file.take();
-            //     return Err(err);
-            // }
-        }
-
-        // TODO:
-        // start the background manager
-
-        Ok(db)
-    }
-
-    /// `close` releases all database resources.
-    /// All transactions must be closed before closing the database.
-    pub fn close(&mut self) -> Result<(), DbError> {
-        self.mu.lock_exclusive();
-
-        if self.closed {
-            unsafe { self.mu.unlock_exclusive() };
-            return Err(DbError::DatabaseClosed);
-        }
-
-        self.closed = true;
-        if self.persist {
-            let file = self.file.take().unwrap();
-            // do a sync but ignore the error
-            let _ = file.sync_all();
-            drop(file);
-        }
-
-        unsafe { self.mu.unlock_exclusive() };
-        Ok(())
-    }
-
-    /// `save` writes a snapshot of the database to a writer. This operation blocks all
-    /// writes, but not reads. This can be used for snapshots and backups for pure
-    /// in-memory databases using the ":memory:". Database that persist to disk
-    /// can be snapshotted by simply copying the database file.
-    pub fn save(&mut self, writer: &mut dyn io::Write) -> Result<(), io::Error> {
-        self.mu.lock_shared();
-        let mut err = None;
-        // use a buffered writer and flush every 4MB
-        let mut buf = Vec::with_capacity(4 * 1024 * 1024);
-        // iterate through every item in the database and write to the buffer
-        self.keys.ascend(None, |item| {
-            item.write_set_to(&mut buf);
-
-            if buf.len() > 4 * 1024 * 1024 {
-                // flush when buffer is over 4MB
-                if let Err(e) = writer.write_all(&buf) {
-                    err = Some(e);
-                    return false;
-                }
-                buf.clear();
-            }
-
-            true
-        });
-
-        if let Some(e) = err {
-            unsafe { self.mu.unlock_shared() };
-            return Err(e);
-        }
-
-        // one final flush
-        if !buf.is_empty() {
-            writer.write_all(&buf)?;
-        }
-
-        unsafe { self.mu.unlock_shared() };
-        Ok(())
-    }
-
-    /// `read_load` reads from the reader and loads commands into the database.
-    /// modTime is the modified time of the reader, should be no greater than
-    /// the current time.Now().
-    /// Returns the number of bytes of the last command read and the error if any.
-    pub fn read_load(
-        &self,
-        _reader: &dyn io::Read,
-        _mod_time: time::SystemTime,
-    ) -> (u64, Option<io::Error>) {
-        // let mut total_size = 0;
-        // let mut data = Vec::with_capacity(4096);
-        // let mut parts = vec![];
-
-        // loop {
-        // peek at the first byte. If it's a 'nul' control character then
-        // ignore it and move to the next byte.
-
-        // }
-
-        // (0, None)
-        todo!()
-    }
-
-    /// `load_from_disk` reads entries from the append only database file and fills the database.
-    /// The file format uses the Redis append only file format, which is and a series
-    /// of RESP commands. For more information on RESP please read
-    /// http://redis.io/topics/protocol. The only supported RESP commands are DEL and
-    /// SET.
-    #[allow(unused)]
-    fn load_from_disk(&mut self) -> Result<(), io::Error> {
-        let mut file = &(*self.file.as_ref().unwrap());
-        let metadata = file.metadata()?;
-        let mod_time = metadata.modified()?;
-
-        let (n, maybe_err) = self.read_load(file, mod_time);
-
-        if let Some(err) = maybe_err {
-            if err.kind() == io::ErrorKind::UnexpectedEof {
-                // The db file has ended mid-command, which is allowed but the
-                // data file should be truncated to the end of the last valid
-                // command
-                file.set_len(n)?;
-            } else {
-                return Err(err);
-            }
-        }
-
-        use std::io::Seek;
-        let pos = file.seek(io::SeekFrom::Start(n))?;
-        self.lastaofsz = pos;
-        Ok(())
-    }
-
-    /// `load` loads commands from reader. This operation blocks all reads and writes.
-    /// Note that this can only work for fully in-memory databases opened with
-    /// Open(":memory:").
-    pub fn load(&mut self, reader: &dyn io::Read) -> Result<(), io::Error> {
-        self.mu.lock_exclusive();
-
-        if self.persist {
-            let err = io::Error::new(io::ErrorKind::Other, DbError::PersistenceActive);
-            return Err(err);
-        }
-
-        let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
-
-        unsafe { self.mu.unlock_exclusive() };
-
-        if let Some(err) = maybe_err {
-            return Err(err);
-        }
-
-        Ok(())
-    }
-
-    /// CreateIndex builds a new index and populates it with items.
-    /// The items are ordered in an b-tree and can be retrieved using the
-    /// Ascend* and Descend* methods.
-    /// An error will occur if an index with the same name already exists.
-    ///
-    /// When a pattern is provided, the index will be populated with
-    /// keys that match the specified pattern. This is a very simple pattern
-    /// match where '*' matches on any number characters and '?' matches on
-    /// any one character.
-    /// The less function compares if string 'a' is less than string 'b'.
-    /// It allows for indexes to create custom ordering. It's possible
-    /// that the strings may be textual or binary. It's up to the provided
-    /// less function to handle the content format and comparison.
-    /// There are some default less function that can be used such as
-    /// IndexString, IndexBinary, etc.
-    pub fn create_index(
-        &mut self,
-        name: String,
-        pattern: String,
-        less: Vec<LessFn>,
-    ) -> Result<(), DbError> {
-        self.update(move |tx| tx.create_index(name, pattern, less))
-    }
-
-    /// ReplaceIndex builds a new index and populates it with items.
-    /// The items are ordered in an b-tree and can be retrieved using the
-    /// Ascend* and Descend* methods.
-    /// If a previous index with the same name exists, that index will be deleted.
-    pub fn replace_index(
-        &mut self,
-        name: String,
-        pattern: String,
-        less: Vec<LessFn>,
-    ) -> Result<(), DbError> {
-        self.update(move |tx| {
-            if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
-                if err == DbError::IndexExists {
-                    if let Err(err) = tx.drop_index(name.clone()) {
-                        return Err(err);
-                    }
-                    return tx.create_index(name, pattern, less);
-                }
-                return Err(err);
-            }
-            Ok(())
         })
-    }
-
-    // CreateSpatialIndex builds a new index and populates it with items.
-    // The items are organized in an r-tree and can be retrieved using the
-    // Intersects method.
-    // An error will occur if an index with the same name already exists.
-    //
-    // The rect function converts a string to a rectangle. The rectangle is
-    // represented by two arrays, min and max. Both arrays may have a length
-    // between 1 and 20, and both arrays must match in length. A length of 1 is a
-    // one dimensional rectangle, and a length of 4 is a four dimension rectangle.
-    // There is support for up to 20 dimensions.
-    // The values of min must be less than the values of max at the same dimension.
-    // Thus min[0] must be less-than-or-equal-to max[0].
-    // The IndexRect is a default function that can be used for the rect
-    // parameter.
-    pub fn create_spatial_index(
-        &mut self,
-        name: String,
-        pattern: String,
-        rect: RectFn,
-    ) -> Result<(), DbError> {
-        self.update(|tx| tx.create_spatial_index(name, pattern, rect))
-    }
-
-    // ReplaceSpatialIndex builds a new index and populates it with items.
-    // The items are organized in an r-tree and can be retrieved using the
-    // Intersects method.
-    // If a previous index with the same name exists, that index will be deleted.
-    pub fn replace_spatial_index(
-        &mut self,
-        name: String,
-        pattern: String,
-        rect: RectFn,
-    ) -> Result<(), DbError> {
-        self.update(move |tx| {
-            if let Err(err) = tx.create_spatial_index(name.clone(), pattern.clone(), rect.clone()) {
-                if err == DbError::IndexExists {
-                    if let Err(err) = tx.drop_index(name.clone()) {
-                        return Err(err);
-                    }
-                    return tx.create_spatial_index(name, pattern, rect);
-                }
-                return Err(err);
-            }
-            Ok(())
-        })
-    }
-
-    /// DropIndex removes an index.
-    pub fn drop_index(&mut self, name: String) -> Result<(), DbError> {
-        self.update(|tx| tx.drop_index(name.clone()))
-    }
-
-    /// Indexes returns a list of index names.
-    pub fn indexes(&mut self) -> Result<Vec<String>, DbError> {
-        self.view(|tx| tx.indexes())
-    }
-
-    /// ReadConfig returns the database configuration.
-    pub fn read_config(&self) -> Result<Config, DbError> {
-        self.mu.lock_shared();
-        if self.closed {
-            unsafe { self.mu.unlock_shared() };
-            return Err(DbError::DatabaseClosed);
-        }
-        let c = self.config.clone();
-        unsafe { self.mu.unlock_shared() };
-        Ok(c)
-    }
-
-    /// SetConfig updates the database configuration.
-    pub fn set_config(&mut self, config: Config) -> Result<(), DbError> {
-        self.mu.lock_exclusive();
-        if self.closed {
-            unsafe { self.mu.unlock_exclusive() };
-            return Err(DbError::DatabaseClosed);
-        }
-        self.config = config;
-        unsafe { self.mu.unlock_exclusive() };
-        Ok(())
     }
 
     /// insertIntoDatabase performs inserts an item in to the database and updates
     /// all indexes. If a previous item with the same key already exists, that item
     /// will be replaced with the new one, and return the previous item.
-    pub fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
+    pub(crate) fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
         // Generate a list of indexes that this item will be inserted into
         let mut ins_idxs = vec![];
         for (_, idx) in self.idxs.iter_mut() {
@@ -631,10 +257,411 @@ impl Db {
 
         maybe_prev
     }
+}
+
+/// Db represents a collection of key-value pairs that persist on disk.
+/// Transactions are used for all forms of data access to the Db.
+#[derive(Clone)]
+pub struct Db(Arc<RwLock<DbInner>>);
+
+/// SyncPolicy represents how often data is synced to disk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SyncPolicy {
+    /// Never is used to disable syncing data to disk.
+    /// The faster and less safe method.
+    Never,
+
+    /// EverySecond is used to sync data to disk every second.
+    /// It's pretty fast and you can lose 1 second of data if there
+    /// is a disaster.
+    /// This is the recommended setting.
+    EverySecond,
+
+    /// Always is used to sync data after every write to disk.
+    /// Slow. Very safe.
+    Always,
+}
+
+impl Default for SyncPolicy {
+    fn default() -> Self {
+        Self::EverySecond
+    }
+}
+
+pub type OnExpiredFn = dyn for<'e> Fn(Vec<String>) + Send + Sync;
+pub type OnExpiredSyncFn =
+    dyn for<'e> Fn(String, String, &mut Tx) -> Result<(), DbError> + Send + Sync;
+
+// Config represents database configuration options. These
+// options are used to change various behaviors of the database.
+#[derive(Clone, Default)]
+pub struct Config {
+    // SyncPolicy adjusts how often the data is synced to disk.
+    // This value can be Never, EverySecond, or Always.
+    // The default is EverySecond.
+    sync_policy: SyncPolicy,
+
+    // `auto_shrink_percentage` is used by the background process to trigger
+    // a shrink of the aof file when the size of the file is larger than the
+    // percentage of the result of the previous shrunk file.
+    // For example, if this value is 100, and the last shrink process
+    // resulted in a 100mb file, then the new aof file must be 200mb before
+    // a shrink is triggered.
+    auto_shrink_percentage: u64,
+
+    // `auto_shrink_min_size` defines the minimum size of the aof file before
+    // an automatic shrink can occur.
+    auto_shrink_min_size: u64,
+
+    // auto_shrink_disabled turns off automatic background shrinking
+    auto_shrink_disabled: bool,
+
+    // `on_expired` is used to custom handle the deletion option when a key
+    // has been expired.
+    on_expired: Option<Arc<OnExpiredFn>>,
+
+    // `on_expired_sync` will be called inside the same transaction that is
+    // performing the deletion of expired items. If OnExpired is present then
+    // this callback will not be called. If this callback is present, then the
+    // deletion of the timeed-out item is the explicit responsibility of this
+    // callback.
+    on_expired_sync: Option<Arc<OnExpiredSyncFn>>,
+}
+
+fn keys_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
+    if a.keyless {
+        return Ordering::Less;
+    } else if b.keyless {
+        return Ordering::Greater;
+    }
+    a.key.cmp(&b.key)
+}
+
+fn exps_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
+    // The expires b-tree formula
+    if b.expires_at() > a.expires_at() {
+        return Ordering::Greater;
+    }
+    if a.expires_at() > b.expires_at() {
+        return Ordering::Less;
+    }
+
+    if a.keyless {
+        return Ordering::Less;
+    } else if b.keyless {
+        return Ordering::Greater;
+    }
+    a.key.cmp(&b.key)
+}
+
+impl Db {
+    pub fn open(path: &str) -> Result<Db, io::Error> {
+        // initialize default configuration
+        let config = Config {
+            auto_shrink_percentage: 100,
+            auto_shrink_min_size: 32 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        let mut inner = DbInner {
+            file: None,
+            buf: Vec::new(),
+            keys: BTreeC::new(Box::new(keys_compare_fn)),
+            exps: BTreeC::new(Box::new(exps_compare_fn)),
+            idxs: HashMap::new(),
+            ins_idxs: Vec::new(),
+            flushes: 0,
+            closed: false,
+            config,
+            persist: path != ":memory:",
+            shrinking: false,
+            lastaofsz: 0,
+        };
+
+        if inner.persist {
+            // hardcoding 0666 as the default mode.
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(path)?;
+            inner.file = Some(file);
+
+            // load the database from disk
+            // TODO:
+            // if let Err(err) = db.load_from_disk() {
+            //     // close on error, ignore close error
+            //     db.file.take();
+            //     return Err(err);
+            // }
+        }
+
+        let db = Db(Arc::new(RwLock::new(inner)));
+        // TODO:
+        // start the background manager
+        db.background_manager();
+
+        Ok(db)
+    }
+
+    /// `close` releases all database resources.
+    /// All transactions must be closed before closing the database.
+    pub fn close(&mut self) -> Result<(), DbError> {
+        let mut db = self.0.write();
+
+        if db.closed {
+            return Err(DbError::DatabaseClosed);
+        }
+
+        db.closed = true;
+        if db.persist {
+            let file = db.file.take().unwrap();
+            // do a sync but ignore the error
+            let _ = file.sync_all();
+            drop(file);
+        }
+
+        Ok(())
+    }
+
+    /// `save` writes a snapshot of the database to a writer. This operation blocks all
+    /// writes, but not reads. This can be used for snapshots and backups for pure
+    /// in-memory databases using the ":memory:". Database that persist to disk
+    /// can be snapshotted by simply copying the database file.
+    pub fn save(&mut self, writer: &mut dyn io::Write) -> Result<(), io::Error> {
+        let db = self.0.read();
+        let mut err = None;
+        // use a buffered writer and flush every 4MB
+        let mut buf = Vec::with_capacity(4 * 1024 * 1024);
+        // iterate through every item in the database and write to the buffer
+        db.keys.ascend(None, |item| {
+            item.write_set_to(&mut buf);
+
+            if buf.len() > 4 * 1024 * 1024 {
+                // flush when buffer is over 4MB
+                if let Err(e) = writer.write_all(&buf) {
+                    err = Some(e);
+                    return false;
+                }
+                buf.clear();
+            }
+
+            true
+        });
+
+        if let Some(e) = err {
+            return Err(e);
+        }
+
+        // one final flush
+        if !buf.is_empty() {
+            writer.write_all(&buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// `read_load` reads from the reader and loads commands into the database.
+    /// modTime is the modified time of the reader, should be no greater than
+    /// the current time.Now().
+    /// Returns the number of bytes of the last command read and the error if any.
+    pub fn read_load(
+        &self,
+        _reader: &dyn io::Read,
+        _mod_time: time::SystemTime,
+    ) -> (u64, Option<io::Error>) {
+        // let mut total_size = 0;
+        // let mut data = Vec::with_capacity(4096);
+        // let mut parts = vec![];
+
+        // loop {
+        // peek at the first byte. If it's a 'nul' control character then
+        // ignore it and move to the next byte.
+
+        // }
+
+        // (0, None)
+        todo!()
+    }
+
+    /// `load_from_disk` reads entries from the append only database file and fills the database.
+    /// The file format uses the Redis append only file format, which is and a series
+    /// of RESP commands. For more information on RESP please read
+    /// http://redis.io/topics/protocol. The only supported RESP commands are DEL and
+    /// SET.
+    #[allow(unused)]
+    fn load_from_disk(&mut self) -> Result<(), io::Error> {
+        let mut db = self.0.write();
+        let mut file = &(*db.file.as_ref().unwrap());
+        let metadata = file.metadata()?;
+        let mod_time = metadata.modified()?;
+
+        let (n, maybe_err) = self.read_load(file, mod_time);
+
+        if let Some(err) = maybe_err {
+            if err.kind() == io::ErrorKind::UnexpectedEof {
+                // The db file has ended mid-command, which is allowed but the
+                // data file should be truncated to the end of the last valid
+                // command
+                file.set_len(n)?;
+            } else {
+                return Err(err);
+            }
+        }
+
+        use std::io::Seek;
+        let pos = file.seek(io::SeekFrom::Start(n))?;
+        db.lastaofsz = pos;
+        Ok(())
+    }
+
+    /// `load` loads commands from reader. This operation blocks all reads and writes.
+    /// Note that this can only work for fully in-memory databases opened with
+    /// Open(":memory:").
+    pub fn load(&mut self, reader: &dyn io::Read) -> Result<(), io::Error> {
+        let db = self.0.write();
+
+        if db.persist {
+            let err = io::Error::new(io::ErrorKind::Other, DbError::PersistenceActive);
+            return Err(err);
+        }
+
+        let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
+
+        if let Some(err) = maybe_err {
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
+    /// CreateIndex builds a new index and populates it with items.
+    /// The items are ordered in an b-tree and can be retrieved using the
+    /// Ascend* and Descend* methods.
+    /// An error will occur if an index with the same name already exists.
+    ///
+    /// When a pattern is provided, the index will be populated with
+    /// keys that match the specified pattern. This is a very simple pattern
+    /// match where '*' matches on any number characters and '?' matches on
+    /// any one character.
+    /// The less function compares if string 'a' is less than string 'b'.
+    /// It allows for indexes to create custom ordering. It's possible
+    /// that the strings may be textual or binary. It's up to the provided
+    /// less function to handle the content format and comparison.
+    /// There are some default less function that can be used such as
+    /// IndexString, IndexBinary, etc.
+    pub fn create_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        less: Vec<Arc<LessFn>>,
+    ) -> Result<(), DbError> {
+        self.update(move |tx| tx.create_index(name, pattern, less))
+    }
+
+    /// ReplaceIndex builds a new index and populates it with items.
+    /// The items are ordered in an b-tree and can be retrieved using the
+    /// Ascend* and Descend* methods.
+    /// If a previous index with the same name exists, that index will be deleted.
+    pub fn replace_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        less: Vec<Arc<LessFn>>,
+    ) -> Result<(), DbError> {
+        self.update(move |tx| {
+            if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
+                if err == DbError::IndexExists {
+                    if let Err(err) = tx.drop_index(name.clone()) {
+                        return Err(err);
+                    }
+                    return tx.create_index(name, pattern, less);
+                }
+                return Err(err);
+            }
+            Ok(())
+        })
+    }
+
+    // CreateSpatialIndex builds a new index and populates it with items.
+    // The items are organized in an r-tree and can be retrieved using the
+    // Intersects method.
+    // An error will occur if an index with the same name already exists.
+    //
+    // The rect function converts a string to a rectangle. The rectangle is
+    // represented by two arrays, min and max. Both arrays may have a length
+    // between 1 and 20, and both arrays must match in length. A length of 1 is a
+    // one dimensional rectangle, and a length of 4 is a four dimension rectangle.
+    // There is support for up to 20 dimensions.
+    // The values of min must be less than the values of max at the same dimension.
+    // Thus min[0] must be less-than-or-equal-to max[0].
+    // The IndexRect is a default function that can be used for the rect
+    // parameter.
+    pub fn create_spatial_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        rect: Arc<RectFn>,
+    ) -> Result<(), DbError> {
+        self.update(|tx| tx.create_spatial_index(name, pattern, rect))
+    }
+
+    // ReplaceSpatialIndex builds a new index and populates it with items.
+    // The items are organized in an r-tree and can be retrieved using the
+    // Intersects method.
+    // If a previous index with the same name exists, that index will be deleted.
+    pub fn replace_spatial_index(
+        &mut self,
+        name: String,
+        pattern: String,
+        rect: Arc<RectFn>,
+    ) -> Result<(), DbError> {
+        self.update(move |tx| {
+            if let Err(err) = tx.create_spatial_index(name.clone(), pattern.clone(), rect.clone()) {
+                if err == DbError::IndexExists {
+                    if let Err(err) = tx.drop_index(name.clone()) {
+                        return Err(err);
+                    }
+                    return tx.create_spatial_index(name, pattern, rect);
+                }
+                return Err(err);
+            }
+            Ok(())
+        })
+    }
+
+    /// DropIndex removes an index.
+    pub fn drop_index(&mut self, name: String) -> Result<(), DbError> {
+        self.update(|tx| tx.drop_index(name.clone()))
+    }
+
+    /// Indexes returns a list of index names.
+    pub fn indexes(&mut self) -> Result<Vec<String>, DbError> {
+        self.view(|tx| tx.indexes())
+    }
+
+    /// ReadConfig returns the database configuration.
+    pub fn read_config(&self) -> Result<Config, DbError> {
+        let db = self.0.read();
+        if db.closed {
+            return Err(DbError::DatabaseClosed);
+        }
+        let c = db.config.clone();
+        Ok(c)
+    }
+
+    /// SetConfig updates the database configuration.
+    pub fn set_config(&mut self, config: Config) -> Result<(), DbError> {
+        let mut db = self.0.write();
+        if db.closed {
+            return Err(DbError::DatabaseClosed);
+        }
+        db.config = config;
+        Ok(())
+    }
 
     // Returns true if database has been closed.
-    #[allow(unused)]
-    fn background_manager_inner(&mut self, mut flushes: i64) -> bool {
+    fn background_manager_inner(&mut self, flushes: &mut i64) -> bool {
         let mut shrink = false;
         let mut expired = vec![];
         let mut on_expired = None;
@@ -643,15 +670,28 @@ impl Db {
         // Open a standard view. This will take a full lock of the
         // database thus allowing for access to anything we need.
         let update_result = self.update(|tx| {
-            let db = tx.db.as_ref().unwrap();
-            on_expired = db.config.on_expired;
+            let db = tx.db_lock.as_mut().unwrap().as_mut();
+            on_expired = db.config.on_expired.clone();
 
             if on_expired.is_none() {
-                on_expired_sync = db.config.on_expired_sync;
+                on_expired_sync = db.config.on_expired_sync.clone();
             }
 
             if db.persist && !db.config.auto_shrink_disabled {
-                // TODO:
+                use std::io::Seek;
+                let aofsz = db
+                    .file
+                    .as_mut()
+                    .unwrap()
+                    .seek(io::SeekFrom::Current(0))
+                    .expect("Failed to get current file position");
+
+                if aofsz > db.config.auto_shrink_min_size {
+                    let prc: f64 = db.config.auto_shrink_percentage as f64 / 100.0;
+                    let prcsz = db.lastaofsz as f64 * prc;
+                    let prcsz = ((prcsz / 100_000.0).round() as u64) * 100_000;
+                    shrink = aofsz > db.lastaofsz + prcsz;
+                }
             }
 
             // produce a list of expired items that need removing
@@ -703,15 +743,14 @@ impl Db {
 
         // execute a disk synk, if needed
         {
-            self.mu.lock_exclusive();
-            if self.persist
-                && self.config.sync_policy == SyncPolicy::EverySecond
-                && flushes != self.flushes
+            let mut db = self.0.write();
+            if db.persist
+                && db.config.sync_policy == SyncPolicy::EverySecond
+                && *flushes != db.flushes
             {
-                let _ = self.file.as_mut().unwrap().sync_all();
-                flushes = self.flushes;
+                let _ = db.file.as_mut().unwrap().sync_all();
+                *flushes = db.flushes;
             }
-            unsafe { self.mu.unlock_exclusive() };
         }
 
         if shrink {
@@ -727,29 +766,149 @@ impl Db {
 
     /// backgroundManager runs continuously in the background and performs various
     /// operations such as removing expired items and syncing to disk.
-    #[allow(unused)]
-    fn background_manager(&mut self) -> std::thread::JoinHandle<()> {
-        todo!();
+    fn background_manager(&self) -> std::thread::JoinHandle<()> {
+        let db = self.clone();
+        // TODO: join handle should be saved in the struct?
+        std::thread::spawn(move || {
+            let mut flushes = 0;
+            loop {
+                // FIXME: this is naive, we'll be sleeping 1s between `background_manager_inner`
+                // calls, instead of calling `background_manager_inner` every second
+                std::thread::sleep(time::Duration::from_secs(1));
 
-        // std::thread::spawn(move || {
-        //     let mut flushes = 0;
-        //     loop {
-        //         // FIXME: this is naive, we'll be sleeping 1s between `background_manager_inner`
-        //         // calls, instead of calling `background_manager_inner` every second
-        //         std::thread::sleep(time::Duration::from_secs(1));
-
-        //         if self.background_manager_inner(flushes) {
-        //             break;
-        //         }
-        //     }
-        // })
+                if db.clone().background_manager_inner(&mut flushes) {
+                    break;
+                }
+            }
+        })
     }
 
+    // TODO: this function uses to much `.unwrap()` and `expect()`, should
+    // be rewritten to handle errors gracefully.
     /// Shrink will make the database file smaller by removing redundant
     /// log entries. This operation does not block the database.
-    #[allow(unused)]
     fn shrink(&mut self) -> Result<(), DbError> {
-        todo!()
+        let mut db = self.0.write();
+
+        if db.closed {
+            return Err(DbError::DatabaseClosed);
+        }
+
+        if !db.persist {
+            // The database was opened with ":memory:" as the path.
+            // There is no persistence, and no need to do anything here.
+            return Ok(());
+        }
+
+        if db.shrinking {
+            // The database is already in the process of shrinking.
+            return Err(DbError::ShrinkInProcess);
+        }
+
+        db.shrinking = true;
+
+        let file_name = "";
+        let tmp_file_name = format!("{}.tmp", file_name);
+        // the endpos is used to return to the end of the file when we are
+        // finished writing all of the current items.
+        use std::io::Seek;
+        let endpos = db
+            .file
+            .as_mut()
+            .unwrap()
+            .seek(io::SeekFrom::End(0))
+            .expect("Failed to seek db file.");
+
+        drop(db);
+        // wait just a bit before starting
+        std::thread::sleep(time::Duration::from_millis(250));
+
+        let mut temp_file =
+            std::fs::File::create(&tmp_file_name).expect("Failed to create database file");
+
+        // we are going to read items in as chunks as to not hold up the database
+        // for too long.
+        let mut buf = Vec::new();
+        let mut pivot_key = "".to_string();
+        let mut done = false;
+
+        while !done {
+            let db = self.0.read();
+            if db.closed {
+                return Err(DbError::DatabaseClosed);
+            }
+            done = true;
+            let mut n = 0;
+            let pivot_item = DbItem {
+                key: pivot_key.to_string(),
+                ..Default::default()
+            };
+            // TODO: extraneous DB lookup because iterator is using (key, value) instead of item ref
+            btree_ascend_greater_or_equal(&db.keys, Some(pivot_item), |k, _v| {
+                // 1000 items or 64MB buffer
+                if n > 1000 || buf.len() > 64 * 1024 * 1024 {
+                    pivot_key = k.to_string();
+                    done = false;
+                    return false;
+                }
+                let item = db.get(k.to_string()).unwrap();
+                item.write_set_to(&mut buf);
+                n += 1;
+                true
+            });
+            if !buf.is_empty() {
+                temp_file
+                    .write_all(&buf)
+                    .expect("Failed to write to temporary db file");
+                buf.clear();
+            }
+        }
+
+        // We reached this far so all of the items have been written to a new tmp
+        // There's some more work to do by appending the new line from the aof
+        // to the tmp file and finally swap the files out.
+        {
+            let mut db = self.0.write();
+            if db.closed {
+                return Err(DbError::DatabaseClosed);
+            }
+            // We are going to open a new version of the aof file so that we do
+            // not change the seek position of the previous. This may cause a
+            // problem in the future if we choose to use syscall file locking.
+            let mut aof = std::fs::File::open(file_name).expect("Failed to open AOF db file");
+            aof.seek(io::SeekFrom::Start(endpos))
+                .expect("Failed to seek AOF db file");
+            // Just copy all of the new command that have ocurred since we started the shrink process.
+            std::io::copy(&mut aof, &mut temp_file).expect("Failed to sync tmp and AOF file");
+            // Close all files
+            drop(aof);
+            drop(temp_file);
+            drop(db.file.take());
+            // Any failures below here is really bad. So just panic.
+            std::fs::rename(&tmp_file_name, file_name).expect("Failed to rename tmp DB file");
+            let db_file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(file_name)
+                .expect("Failed to open new DB file");
+            db.file = Some(db_file);
+            let pos = db
+                .file
+                .as_mut()
+                .unwrap()
+                .seek(io::SeekFrom::End(0))
+                .expect("Failed to seek new DB file");
+            db.lastaofsz = pos;
+        }
+
+        let _ = std::fs::remove_file(&tmp_file_name);
+        {
+            let mut db = self.0.write();
+            db.shrinking = false;
+        }
+
+        Ok(())
     }
 
     /// managed calls a block of code that is fully contained in a transaction.
@@ -806,14 +965,6 @@ impl Db {
         self.managed(true, func)
     }
 
-    /// get return an item or nil if not found.
-    pub fn get(&self, key: String) -> Option<&DbItem> {
-        self.keys.get(DbItem {
-            key,
-            ..Default::default()
-        })
-    }
-
     // Begin opens a new transaction.
     // Multiple read-only transactions can be opened at the same time but there can
     // only be one read/write transaction at a time. Attempting to open a read/write
@@ -821,8 +972,13 @@ impl Db {
     // the current read/write transaction is completed.
     //
     // All transactions must be closed by calling Commit() or Rollback() when done.
-    fn begin(&mut self, writable: bool) -> Result<Tx, DbError> {
-        Tx::new(self, writable)
+    fn begin(&self, writable: bool) -> Result<Tx, DbError> {
+        let db_lock = if writable {
+            DbLock::Write(self.0.write())
+        } else {
+            DbLock::Read(self.0.read())
+        };
+        Tx::new(db_lock, writable)
     }
 }
 
@@ -1268,7 +1424,7 @@ mod tests {
         assert_eq!(val, "planet");
 
         db.update(|tx| {
-            let saved_db = tx.db.take().unwrap();
+            let saved_db = tx.db_lock.take().unwrap();
             let e = tx
                 .set("hello".to_string(), "planet".to_string(), None)
                 .unwrap_err();
@@ -1278,7 +1434,7 @@ mod tests {
             let e = tx.get("hello".to_string(), true).unwrap_err();
             assert_eq!(e, DbError::TxClosed);
 
-            tx.db = Some(saved_db);
+            tx.db_lock = Some(saved_db);
             tx.writable = false;
             let e = tx
                 .set("hello".to_string(), "planet".to_string(), None)
@@ -1334,12 +1490,11 @@ mod tests {
         // test fo closed transactions
         let err = db
             .update(|tx| {
-                tx.db = None;
+                tx.db_lock = None;
                 Ok(())
             })
             .unwrap_err();
         assert_eq!(err, DbError::TxClosed);
-        unsafe { db.mu.unlock_exclusive() };
 
         // test for invalid writes
 

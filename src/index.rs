@@ -2,9 +2,9 @@ use btreec::BTreeC;
 use std::cmp::Ordering;
 
 use crate::item::DbItem;
-use crate::Db;
 use crate::LessFn;
 use crate::RectFn;
+use std::sync::Arc;
 
 /// `IndexOptions` provides an index with additional features or
 /// alternate functionality.
@@ -31,10 +31,10 @@ pub struct Index {
     pattern: String,
 
     /// less comparison function
-    pub less: Option<LessFn>,
+    pub less: Option<Arc<LessFn>>,
 
     /// rect from string function
-    pub rect: Option<RectFn>,
+    pub rect: Option<Arc<RectFn>>,
 
     /// index options
     opts: IndexOptions,
@@ -44,8 +44,8 @@ impl Index {
     pub fn new(
         name: String,
         pattern: String,
-        less: Option<LessFn>,
-        rect: Option<RectFn>,
+        less: Option<Arc<LessFn>>,
+        rect: Option<Arc<RectFn>>,
         opts: IndexOptions,
     ) -> Self {
         Index {
@@ -121,7 +121,7 @@ impl Index {
     }
 
     // `rebuild` rebuilds the index
-    pub fn rebuild(&mut self, db: &Db) {
+    pub fn rebuild(&mut self, keys: &BTreeC<DbItem>) {
         // initialize trees
         // NOTE: keep in sync with fn in `clear_copy`
         if let Some(less_fn) = self.less.clone() {
@@ -148,7 +148,7 @@ impl Index {
             // self.rtr =
         }
         // iterate through all keys and fill the index
-        db.keys.ascend(None, |item| {
+        keys.ascend(None, |item| {
             if !self.matches(&item.key) {
                 // does not match the pattern continue
                 return true;
