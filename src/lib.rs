@@ -95,10 +95,8 @@ impl fmt::Display for DbError {
 
 impl Error for DbError {}
 
-struct DbInner {
-    /// the gatekeeper for all fields
-    mu: RawRwLock,
-
+#[allow(unused)]
+pub struct DbInner {
     /// the underlying file
     file: Option<File>,
 
@@ -115,7 +113,6 @@ struct DbInner {
     idxs: HashMap<String, Index>,
 
     /// a reuse buffer for gathering indexes
-    #[allow(unused)]
     ins_idxs: Vec<Index>,
 
     /// a count of the number of disk flushes
@@ -131,59 +128,59 @@ struct DbInner {
     persist: bool,
 
     /// when an aof shrink is in-process.
-    #[allow(unused)]
+    
     shrinking: bool,
 
     /// the size of the last shrink aof size
     lastaofsz: u64,
 }
 
-pub struct DbNew(Arc<RwLock<DbInner>>);
+pub struct Db(Arc<RwLock<DbInner>>);
 
 /// Db represents a collection of key-value pairs that persist on disk.
 /// Transactions are used for all forms of data access to the Db.
-pub struct Db {
-    /// the gatekeeper for all fields
-    mu: RawRwLock,
+// pub struct Db {
+//     /// the gatekeeper for all fields
+//     mu: RawRwLock,
 
-    /// the underlying file
-    file: Option<File>,
+//     /// the underlying file
+//     file: Option<File>,
 
-    /// a buffer to write to
-    buf: Vec<u8>,
+//     /// a buffer to write to
+//     buf: Vec<u8>,
 
-    /// a tree of all item ordered by key
-    keys: BTreeC<DbItem>,
+//     /// a tree of all item ordered by key
+//     keys: BTreeC<DbItem>,
 
-    /// a tree of items ordered by expiration
-    exps: BTreeC<DbItem>,
+//     /// a tree of items ordered by expiration
+//     exps: BTreeC<DbItem>,
 
-    /// the index trees.
-    idxs: HashMap<String, Index>,
+//     /// the index trees.
+//     idxs: HashMap<String, Index>,
 
-    /// a reuse buffer for gathering indexes
-    #[allow(unused)]
-    ins_idxs: Vec<Index>,
+//     /// a reuse buffer for gathering indexes
+//     #[allow(unused)]
+//     ins_idxs: Vec<Index>,
 
-    /// a count of the number of disk flushes
-    flushes: i64,
+//     /// a count of the number of disk flushes
+//     flushes: i64,
 
-    /// set when the database has been closed
-    closed: bool,
+//     /// set when the database has been closed
+//     closed: bool,
 
-    /// the database configuration
-    config: Config,
+//     /// the database configuration
+//     config: Config,
 
-    /// do we write to disk
-    persist: bool,
+//     /// do we write to disk
+//     persist: bool,
 
-    /// when an aof shrink is in-process.
-    #[allow(unused)]
-    shrinking: bool,
+//     /// when an aof shrink is in-process.
+//     #[allow(unused)]
+//     shrinking: bool,
 
-    /// the size of the last shrink aof size
-    lastaofsz: u64,
-}
+//     /// the size of the last shrink aof size
+//     lastaofsz: u64,
+// }
 
 /// SyncPolicy represents how often data is synced to disk.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,8 +280,8 @@ impl Db {
             ..Default::default()
         };
 
-        let mut db = Db {
-            mu: RawRwLock::INIT,
+        let mut inner = DbInner {
+            // mu: RawRwLock::INIT,
             file: None,
             buf: Vec::new(),
             keys: BTreeC::new(Box::new(keys_compare_fn)),
@@ -299,14 +296,14 @@ impl Db {
             lastaofsz: 0,
         };
 
-        if db.persist {
+        if inner.persist {
             // hardcoding 0666 as the default mode.
             let file = OpenOptions::new()
                 .create(true)
                 .read(true)
                 .write(true)
                 .open(path)?;
-            db.file = Some(file);
+            inner.file = Some(file);
 
             // load the database from disk
             // TODO:
@@ -317,6 +314,7 @@ impl Db {
             // }
         }
 
+        let db = Db(Arc::new(RwLock::new(inner)));
         // TODO:
         // start the background manager
 
@@ -326,22 +324,20 @@ impl Db {
     /// `close` releases all database resources.
     /// All transactions must be closed before closing the database.
     pub fn close(&mut self) -> Result<(), DbError> {
-        self.mu.lock_exclusive();
+        let db = self.0.write();
 
-        if self.closed {
-            unsafe { self.mu.unlock_exclusive() };
+        if db.closed {
             return Err(DbError::DatabaseClosed);
         }
 
-        self.closed = true;
-        if self.persist {
-            let file = self.file.take().unwrap();
+        db.closed = true;
+        if db.persist {
+            let file = db.file.take().unwrap();
             // do a sync but ignore the error
             let _ = file.sync_all();
             drop(file);
         }
 
-        unsafe { self.mu.unlock_exclusive() };
         Ok(())
     }
 
@@ -350,12 +346,12 @@ impl Db {
     /// in-memory databases using the ":memory:". Database that persist to disk
     /// can be snapshotted by simply copying the database file.
     pub fn save(&mut self, writer: &mut dyn io::Write) -> Result<(), io::Error> {
-        self.mu.lock_shared();
+        let db = self.0.read();
         let mut err = None;
         // use a buffered writer and flush every 4MB
         let mut buf = Vec::with_capacity(4 * 1024 * 1024);
         // iterate through every item in the database and write to the buffer
-        self.keys.ascend(None, |item| {
+        db.keys.ascend(None, |item| {
             item.write_set_to(&mut buf);
 
             if buf.len() > 4 * 1024 * 1024 {
@@ -371,7 +367,6 @@ impl Db {
         });
 
         if let Some(e) = err {
-            unsafe { self.mu.unlock_shared() };
             return Err(e);
         }
 
@@ -380,7 +375,6 @@ impl Db {
             writer.write_all(&buf)?;
         }
 
-        unsafe { self.mu.unlock_shared() };
         Ok(())
     }
 
@@ -414,7 +408,8 @@ impl Db {
     /// SET.
     #[allow(unused)]
     fn load_from_disk(&mut self) -> Result<(), io::Error> {
-        let mut file = &(*self.file.as_ref().unwrap());
+        let db = self.0.write();
+        let mut file = &(*db.file.as_ref().unwrap());
         let metadata = file.metadata()?;
         let mod_time = metadata.modified()?;
 
@@ -433,7 +428,7 @@ impl Db {
 
         use std::io::Seek;
         let pos = file.seek(io::SeekFrom::Start(n))?;
-        self.lastaofsz = pos;
+        db.lastaofsz = pos;
         Ok(())
     }
 
@@ -441,16 +436,14 @@ impl Db {
     /// Note that this can only work for fully in-memory databases opened with
     /// Open(":memory:").
     pub fn load(&mut self, reader: &dyn io::Read) -> Result<(), io::Error> {
-        self.mu.lock_exclusive();
+        let db = self.0.write();
 
-        if self.persist {
+        if db.persist {
             let err = io::Error::new(io::ErrorKind::Other, DbError::PersistenceActive);
             return Err(err);
         }
 
         let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
-
-        unsafe { self.mu.unlock_exclusive() };
 
         if let Some(err) = maybe_err {
             return Err(err);
@@ -566,83 +559,83 @@ impl Db {
 
     /// ReadConfig returns the database configuration.
     pub fn read_config(&self) -> Result<Config, DbError> {
-        self.mu.lock_shared();
-        if self.closed {
-            unsafe { self.mu.unlock_shared() };
+        let db = self.0.read();
+        if db.closed {
             return Err(DbError::DatabaseClosed);
         }
-        let c = self.config.clone();
-        unsafe { self.mu.unlock_shared() };
+        let c = db.config.clone();
         Ok(c)
     }
 
     /// SetConfig updates the database configuration.
     pub fn set_config(&mut self, config: Config) -> Result<(), DbError> {
-        self.mu.lock_exclusive();
-        if self.closed {
-            unsafe { self.mu.unlock_exclusive() };
+        let db = self.0.write();
+        if db.closed {
             return Err(DbError::DatabaseClosed);
         }
-        self.config = config;
-        unsafe { self.mu.unlock_exclusive() };
+        db.config = config;
         Ok(())
     }
 
+    // TODO: should be a method on `DbInner`
     /// insertIntoDatabase performs inserts an item in to the database and updates
     /// all indexes. If a previous item with the same key already exists, that item
     /// will be replaced with the new one, and return the previous item.
-    pub fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
+    pub(crate) fn insert_into_database(&mut self, item: DbItem) -> Option<DbItem> {
+        todo!();
+
         // Generate a list of indexes that this item will be inserted into
-        let mut ins_idxs = vec![];
-        for (_, idx) in self.idxs.iter_mut() {
-            if idx.matches(&item.key) {
-                ins_idxs.push(idx);
-            }
-        }
+        // let mut ins_idxs = vec![];
+        // for (_, idx) in self.idxs.iter_mut() {
+        //     if idx.matches(&item.key) {
+        //         ins_idxs.push(idx);
+        //     }
+        // }
 
-        let maybe_prev = self.keys.set(item.clone()).map(|p| p.to_owned());
-        if let Some(prev) = &maybe_prev {
-            // A previous item was removed from the keys tree. Let's
-            // full delete this item from all indexes.
-            if let Some(opts) = &prev.opts {
-                if opts.ex {
-                    self.exps.delete(prev.clone());
-                }
-            }
-            for idx in ins_idxs.iter_mut() {
-                if let Some(btr) = idx.btr.as_mut() {
-                    // Remove it from the btree index
-                    btr.delete(item.clone());
-                }
-                //     if let Some(rtr) = idx.rtr.as_mut() {
-                //         // Remove it from the rtree index
-                //         rtr.delete()
-                //     }
-            }
-        }
-        if let Some(opts) = &item.opts {
-            if opts.ex {
-                // The new item has eviction options. Add it to the
-                // expires tree.
-                self.exps.set(item.clone());
-            }
-        }
-        for idx in ins_idxs.drain(..) {
-            if let Some(btr) = idx.btr.as_mut() {
-                // Remove it from the btree index
-                btr.set(item.clone());
-            }
-            // TODO:
-            // if let Some(rtr) = idx.rtr.as_mut() {
-            //     // Remove it from the rtree index
-            //     rtr.set(item.clone())
-            // }
-        }
+        // let maybe_prev = self.keys.set(item.clone()).map(|p| p.to_owned());
+        // if let Some(prev) = &maybe_prev {
+        //     // A previous item was removed from the keys tree. Let's
+        //     // full delete this item from all indexes.
+        //     if let Some(opts) = &prev.opts {
+        //         if opts.ex {
+        //             self.exps.delete(prev.clone());
+        //         }
+        //     }
+        //     for idx in ins_idxs.iter_mut() {
+        //         if let Some(btr) = idx.btr.as_mut() {
+        //             // Remove it from the btree index
+        //             btr.delete(item.clone());
+        //         }
+        //         //     if let Some(rtr) = idx.rtr.as_mut() {
+        //         //         // Remove it from the rtree index
+        //         //         rtr.delete()
+        //         //     }
+        //     }
+        // }
+        // if let Some(opts) = &item.opts {
+        //     if opts.ex {
+        //         // The new item has eviction options. Add it to the
+        //         // expires tree.
+        //         self.exps.set(item.clone());
+        //     }
+        // }
+        // for idx in ins_idxs.drain(..) {
+        //     if let Some(btr) = idx.btr.as_mut() {
+        //         // Remove it from the btree index
+        //         btr.set(item.clone());
+        //     }
+        //     // TODO:
+        //     // if let Some(rtr) = idx.rtr.as_mut() {
+        //     //     // Remove it from the rtree index
+        //     //     rtr.set(item.clone())
+        //     // }
+        // }
 
-        // we must return previous item to the caller
-        maybe_prev
+        // // we must return previous item to the caller
+        // maybe_prev
     }
 
+    // TODO: should be a method on `DbInner`
     /// deleteFromDatabase removes and item from the database and indexes. The input
     /// item must only have the key field specified thus "&dbItem{key: key}" is all
     /// that is needed to fully remove the item with the matching key. If an item
@@ -650,125 +643,129 @@ impl Db {
     /// returned to the caller. A nil return value means that the item was not
     /// found in the database
     pub fn delete_from_database(&mut self, item: DbItem) -> Option<DbItem> {
-        let maybe_prev = self.keys.delete(item.clone()).map(|p| p.to_owned());
+        todo!();
 
-        if let Some(prev) = &maybe_prev {
-            if let Some(opts) = &prev.opts {
-                if opts.ex {
-                    // Remove it from the expires tree.
-                    self.exps.delete(prev.clone());
-                }
-            }
-            for (_, idx) in self.idxs.iter_mut() {
-                if !idx.matches(&item.key) {
-                    continue;
-                }
-                if let Some(btr) = idx.btr.as_mut() {
-                    // Remove it from the btree index
-                    btr.delete(prev.clone());
-                }
-                // TODO:
-                //     if let Some(rtr) = idx.rtr.as_mut() {
-                //         // Remove it from the rtree index
-                //         rtr.delete()
-                //     }
-            }
-        }
+        // let maybe_prev = self.keys.delete(item.clone()).map(|p| p.to_owned());
 
-        maybe_prev
+        // if let Some(prev) = &maybe_prev {
+        //     if let Some(opts) = &prev.opts {
+        //         if opts.ex {
+        //             // Remove it from the expires tree.
+        //             self.exps.delete(prev.clone());
+        //         }
+        //     }
+        //     for (_, idx) in self.idxs.iter_mut() {
+        //         if !idx.matches(&item.key) {
+        //             continue;
+        //         }
+        //         if let Some(btr) = idx.btr.as_mut() {
+        //             // Remove it from the btree index
+        //             btr.delete(prev.clone());
+        //         }
+        //         // TODO:
+        //         //     if let Some(rtr) = idx.rtr.as_mut() {
+        //         //         // Remove it from the rtree index
+        //         //         rtr.delete()
+        //         //     }
+        //     }
+        // }
+
+        // maybe_prev
     }
 
     // Returns true if database has been closed.
     #[allow(unused)]
     fn background_manager_inner(&mut self, mut flushes: i64) -> bool {
-        let mut shrink = false;
-        let mut expired = vec![];
-        let mut on_expired = None;
-        let mut on_expired_sync = None;
+        todo!();
 
-        // Open a standard view. This will take a full lock of the
-        // database thus allowing for access to anything we need.
-        let update_result = self.update(|tx| {
-            let db = tx.db.as_ref().unwrap();
-            on_expired = db.config.on_expired;
+        // let mut shrink = false;
+        // let mut expired = vec![];
+        // let mut on_expired = None;
+        // let mut on_expired_sync = None;
 
-            if on_expired.is_none() {
-                on_expired_sync = db.config.on_expired_sync;
-            }
+        // // Open a standard view. This will take a full lock of the
+        // // database thus allowing for access to anything we need.
+        // let update_result = self.update(|tx| {
+        //     let db = tx.db.as_ref().unwrap();
+        //     on_expired = db.config.on_expired;
 
-            if db.persist && !db.config.auto_shrink_disabled {
-                // TODO:
-            }
+        //     if on_expired.is_none() {
+        //         on_expired_sync = db.config.on_expired_sync;
+        //     }
 
-            // produce a list of expired items that need removing
-            let key_item = DbItem {
-                opts: Some(DbItemOpts {
-                    ex: true,
-                    exat: time::Instant::now(),
-                }),
-                ..Default::default()
-            };
-            btree_ascend_less_than(&db.exps, &key_item, |k, v| {
-                expired.push((k.to_string(), v.to_string()));
-                true
-            });
-            if on_expired.is_none() && on_expired_sync.is_none() {
-                for (key, _) in &expired {
-                    if let Err(err) = tx.delete(key.to_string()) {
-                        // it's ok to get a "not found" because the
-                        // 'Delete' method reports "not found" for
-                        // expired items.
-                        if err != DbError::NotFound {
-                            return Err(err);
-                        }
-                    }
-                }
-            } else if let Some(on_expired_sync_) = on_expired_sync {
-                for (key, value) in &expired {
-                    if let Err(err) = on_expired_sync_(key.to_string(), value.to_string(), tx) {
-                        return Err(err);
-                    }
-                }
-            }
-            Ok(())
-        });
+        //     if db.persist && !db.config.auto_shrink_disabled {
+        //         // TODO:
+        //     }
 
-        if let Err(err) = update_result {
-            if err == DbError::DatabaseClosed {
-                return true;
-            }
-        }
+        //     // produce a list of expired items that need removing
+        //     let key_item = DbItem {
+        //         opts: Some(DbItemOpts {
+        //             ex: true,
+        //             exat: time::Instant::now(),
+        //         }),
+        //         ..Default::default()
+        //     };
+        //     btree_ascend_less_than(&db.exps, &key_item, |k, v| {
+        //         expired.push((k.to_string(), v.to_string()));
+        //         true
+        //     });
+        //     if on_expired.is_none() && on_expired_sync.is_none() {
+        //         for (key, _) in &expired {
+        //             if let Err(err) = tx.delete(key.to_string()) {
+        //                 // it's ok to get a "not found" because the
+        //                 // 'Delete' method reports "not found" for
+        //                 // expired items.
+        //                 if err != DbError::NotFound {
+        //                     return Err(err);
+        //                 }
+        //             }
+        //         }
+        //     } else if let Some(on_expired_sync_) = on_expired_sync {
+        //         for (key, value) in &expired {
+        //             if let Err(err) = on_expired_sync_(key.to_string(), value.to_string(), tx) {
+        //                 return Err(err);
+        //             }
+        //         }
+        //     }
+        //     Ok(())
+        // });
 
-        // send expired event, if needed
-        if !expired.is_empty() {
-            if let Some(on_expired_) = on_expired {
-                let expired_keys = expired.into_iter().map(|(k, _)| k).collect();
-                on_expired_(expired_keys);
-            }
-        }
+        // if let Err(err) = update_result {
+        //     if err == DbError::DatabaseClosed {
+        //         return true;
+        //     }
+        // }
 
-        // execute a disk synk, if needed
-        {
-            self.mu.lock_exclusive();
-            if self.persist
-                && self.config.sync_policy == SyncPolicy::EverySecond
-                && flushes != self.flushes
-            {
-                let _ = self.file.as_mut().unwrap().sync_all();
-                flushes = self.flushes;
-            }
-            unsafe { self.mu.unlock_exclusive() };
-        }
+        // // send expired event, if needed
+        // if !expired.is_empty() {
+        //     if let Some(on_expired_) = on_expired {
+        //         let expired_keys = expired.into_iter().map(|(k, _)| k).collect();
+        //         on_expired_(expired_keys);
+        //     }
+        // }
 
-        if shrink {
-            if let Err(err) = self.shrink() {
-                if err == DbError::DatabaseClosed {
-                    return true;
-                }
-            }
-        }
+        // // execute a disk synk, if needed
+        // {
+        //     self.mu.lock_exclusive();
+        //     if self.persist
+        //         && self.config.sync_policy == SyncPolicy::EverySecond
+        //         && flushes != self.flushes
+        //     {
+        //         let _ = self.file.as_mut().unwrap().sync_all();
+        //         flushes = self.flushes;
+        //     }
+        //     unsafe { self.mu.unlock_exclusive() };
+        // }
 
-        false
+        // if shrink {
+        //     if let Err(err) = self.shrink() {
+        //         if err == DbError::DatabaseClosed {
+        //             return true;
+        //         }
+        //     }
+        // }
+
+        // false
     }
 
     /// backgroundManager runs continuously in the background and performs various
@@ -854,7 +851,8 @@ impl Db {
 
     /// get return an item or nil if not found.
     pub fn get(&self, key: String) -> Option<&DbItem> {
-        self.keys.get(DbItem {
+        let db = self.0.read();
+        db.keys.get(DbItem {
             key,
             ..Default::default()
         })

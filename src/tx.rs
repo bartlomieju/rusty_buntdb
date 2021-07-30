@@ -29,7 +29,9 @@ use crate::SyncPolicy;
 // is no longer valid - it should be an arc<mutex<>> or something like this
 pub struct Tx<'db> {
     /// the underlying database.
-    pub db: Option<&'db mut Db>,
+    pub db: Option<Db>,
+
+    // pub db: Option<&'db mut Db>,
     /// are we currently holding DB lock?
     has_lock: bool,
     /// when false mutable operations fail.

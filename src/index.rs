@@ -121,7 +121,7 @@ impl Index {
     }
 
     // `rebuild` rebuilds the index
-    pub fn rebuild(&mut self, db: &Db) {
+    pub fn rebuild(&mut self, keys: &BTreeC<DbItem>) {
         // initialize trees
         // NOTE: keep in sync with fn in `clear_copy`
         if let Some(less_fn) = self.less.clone() {
@@ -148,7 +148,7 @@ impl Index {
             // self.rtr =
         }
         // iterate through all keys and fill the index
-        db.keys.ascend(None, |item| {
+        keys.ascend(None, |item| {
             if !self.matches(&item.key) {
                 // does not match the pattern continue
                 return true;
