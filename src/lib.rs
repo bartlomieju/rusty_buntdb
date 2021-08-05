@@ -33,7 +33,7 @@ use crate::tx::*;
 type RectFn = dyn Fn(String) -> (Vec<f64>, Vec<f64>) + Send + Sync;
 type LessFn = dyn Fn(&str, &str) -> bool + Send + Sync;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum DbError {
     // ErrTxNotWritable is returned when performing a write operation on a
     // read-only transaction.
@@ -71,9 +71,17 @@ pub enum DbError {
     // ErrTxIterating is returned when Set or Delete are called while iterating.
     TxIterating,
 
+    Io(io::Error),
+
     // FIXME: there should be more general error handling than relying on internal
     // type for user errors
     Custom(String),
+}
+
+impl From<io::Error> for DbError {
+    fn from(error: io::Error) -> Self {
+        DbError::Io(error)
+    }
 }
 
 impl fmt::Display for DbError {
@@ -91,6 +99,7 @@ impl fmt::Display for DbError {
             ShrinkInProcess => write!(f, "shrink is in-process"),
             PersistenceActive => write!(f, "persistence active"),
             TxIterating => write!(f, "tx is iterating"),
+            Io(s) => write!(f, "{}", s.to_string()),
             Custom(s) => write!(f, "{}", s),
         }
     }
@@ -467,18 +476,111 @@ impl Db {
     /// Returns the number of bytes of the last command read and the error if any.
     pub fn read_load(
         &self,
-        _reader: &dyn io::Read,
-        _mod_time: time::SystemTime,
-    ) -> (u64, Option<io::Error>) {
-        // let mut total_size = 0;
-        // let mut data = Vec::with_capacity(4096);
-        // let mut parts = vec![];
+        reader: Box<dyn io::Read>,
+        mod_time: time::SystemTime,
+    ) -> (usize, Option<DbError>) {
+        let mut total_size: usize = 0;
+        let mut data = Vec::with_capacity(4096);
+        let mut parts = vec![];
 
-        // loop {
-        // peek at the first byte. If it's a 'nul' control character then
-        // ignore it and move to the next byte.
+        use io::BufRead;
+        use io::Read;
 
-        // }
+        let buf_reader = io::BufReader::new(reader);
+        loop {
+            // TODO: discrepancy with Go version, not checking
+            // for nul byte first
+            // TODO: check if we've reached EOF
+
+            // read a single command
+            // first we should read the number of parts that command has
+            let mut cmd_byte_size = 0;
+            let mut line = String::new();
+            let r = buf_reader.read_line(&mut line);
+            if let Err(err) = r {
+                return (total_size, Some(DbError::from(err)));
+            }
+            if !line.starts_with('*') {
+                return (total_size, Some(DbError::Invalid));
+            }
+            cmd_byte_size += line.len();
+
+            // TODO: need to strip leading '*'
+            // convert the string number to an int
+            let n = line.parse::<usize>().unwrap();
+            // read each part of the command
+            parts = vec![];
+            for i in 0..n {
+                // read the number of bytes of the part.
+                let mut line = String::new();
+                let r = buf_reader.read_line(&mut line);
+                if let Err(err) = r {
+                    return (total_size, Some(DbError::from(err)));
+                }
+                if !line.starts_with('$') {
+                    return (total_size, Some(DbError::Invalid));
+                }
+                cmd_byte_size += line.len();
+                // TODO: need to strip leading '$'
+                // convert the string number to an int
+                let n = line.parse::<usize>().unwrap();
+
+                // resize the read buffer
+                if data.capacity() < n + 2 {
+                    let mut dataln = data.capacity();
+                    while dataln < n + 2 {
+                        dataln *= 2;
+                    }
+                    data.reserve(dataln - data.capacity());
+                }
+                let r = buf_reader.read_exact(&mut data[0..n + 2]);
+                if let Err(err) = r {
+                    return (total_size, Some(DbError::from(err)));
+                }
+                if data[n] != b'\r' || data[n + 1] != b'\n' {
+                    return (total_size, Some(DbError::Invalid));
+                }
+                // copy string
+                parts.push(String::from_utf8(data[..n].to_vec()).unwrap());
+                cmd_byte_size += n + 2;
+            }
+            // finished reading the command
+
+            if parts.is_empty() {
+                continue;
+            }
+
+            if parts[0].to_lowercase() == "set" {
+                // SET
+                if parts.len() < 3 || parts.len() == 4 || parts.len() > 5 {
+                    return (total_size, Some(DbError::Invalid));
+                }
+                if parts.len() == 5 {
+                    if parts[3].to_lowercase() != "ex" {
+                        return (total_size, Some(DbError::Invalid));
+                    }
+                    // TODO:
+                }
+            } else if parts[0].to_lowercase() == "del" {
+                // DEL
+                if parts.len() != 2 {
+                    return (total_size, Some(DbError::Invalid));
+                }
+                let mut db = self.0.write();
+                db.delete_from_database(DbItem {
+                    key: parts[1].to_string(),
+                    ..Default::default()
+                });
+            } else if parts[0].to_lowercase() == "flushdb" {
+                let mut db = self.0.write();
+                db.keys = BTreeC::new(Box::new(keys_compare_fn));
+                db.exps = BTreeC::new(Box::new(exps_compare_fn));
+                db.idxs = HashMap::default();
+            } else {
+                return (total_size, Some(DbError::Invalid));
+            }
+            total_size += cmd_byte_size;
+        }
 
         // (0, None)
         todo!()
@@ -490,20 +592,23 @@ impl Db {
     /// http://redis.io/topics/protocol. The only supported RESP commands are DEL and
     /// SET.
     #[allow(unused)]
-    fn load_from_disk(&mut self) -> Result<(), io::Error> {
+    fn load_from_disk(&mut self) -> Result<(), DbError> {
         let mut db = self.0.write();
         let mut file = &(*db.file.as_ref().unwrap());
         let metadata = file.metadata()?;
         let mod_time = metadata.modified()?;
 
-        let (n, maybe_err) = self.read_load(file, mod_time);
+        let (n, maybe_err) = self.read_load(Box::new(file), mod_time);
+        let n = n as u64;
 
         if let Some(err) = maybe_err {
-            if err.kind() == io::ErrorKind::UnexpectedEof {
-                // The db file has ended mid-command, which is allowed but the
-                // data file should be truncated to the end of the last valid
-                // command
-                file.set_len(n)?;
+            if let DbError::Io(e) = err {
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    // The db file has ended mid-command, which is allowed but the
+                    // data file should be truncated to the end of the last valid
+                    // command
+                    file.set_len(n)?;
+                }
             } else {
                 return Err(err);
             }
@@ -518,12 +623,11 @@ impl Db {
     /// `load` loads commands from reader. This operation blocks all reads and writes.
     /// Note that this can only work for fully in-memory databases opened with
     /// Open(":memory:").
-    pub fn load(&mut self, reader: &dyn io::Read) -> Result<(), io::Error> {
+    pub fn load(&mut self, reader: Box<dyn io::Read>) -> Result<(), DbError> {
         let db = self.0.write();
 
         if db.persist {
-            let err = io::Error::new(io::ErrorKind::Other, DbError::PersistenceActive);
-            return Err(err);
+            return Err(DbError::PersistenceActive);
         }
 
         let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
@@ -571,7 +675,7 @@ impl Db {
     ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_index(name.clone(), pattern.clone(), less.clone()) {
-                if err == DbError::IndexExists {
+                if matches!(err, DbError::IndexExists) {
                     if let Err(err) = tx.drop_index(name.clone()) {
                         return Err(err);
                     }
@@ -618,7 +722,7 @@ impl Db {
     ) -> Result<(), DbError> {
         self.update(move |tx| {
             if let Err(err) = tx.create_spatial_index(name.clone(), pattern.clone(), rect.clone()) {
-                if err == DbError::IndexExists {
+                if matches!(err, DbError::IndexExists) {
                     if let Err(err) = tx.drop_index(name.clone()) {
                         return Err(err);
                     }
@@ -712,7 +816,7 @@ impl Db {
                         // it's ok to get a "not found" because the
                         // 'Delete' method reports "not found" for
                         // expired items.
-                        if err != DbError::NotFound {
+                        if !matches!(err, DbError::NotFound) {
                             return Err(err);
                         }
                     }
@@ -728,7 +832,7 @@ impl Db {
         });
 
         if let Err(err) = update_result {
-            if err == DbError::DatabaseClosed {
+            if matches!(err, DbError::DatabaseClosed) {
                 return true;
             }
         }
@@ -755,7 +859,7 @@ impl Db {
 
         if shrink {
             if let Err(err) = self.shrink() {
-                if err == DbError::DatabaseClosed {
+                if matches!(err, DbError::DatabaseClosed) {
                     return true;
                 }
             }
@@ -1189,7 +1293,7 @@ mod tests {
         db.view(|tx| {
             ascend_equal(tx, "idx1", svec!["3", "1", "2", "2", "1", "3"]);
             let err = tx.ascend("idx2".to_string(), |_, _| true).unwrap_err();
-            assert_eq!(err, DbError::NotFound);
+            assert!(matches!(err, DbError::NotFound));
 
             Ok(())
         })
@@ -1415,10 +1519,11 @@ mod tests {
             .update::<_, ()>(|tx| {
                 tx.set("hello".to_string(), "world".to_string(), None)
                     .unwrap();
-                Err(err_broken.clone())
+                Err(err_broken)
             })
             .unwrap_err();
-        assert_eq!(e, err_broken);
+        let err = DbError::Custom("broken".to_string());
+        assert!(matches!(e, err));
 
         let val = db.view(|tx| tx.get("hello".to_string(), true)).unwrap();
         assert_eq!(val, "planet");
@@ -1428,26 +1533,26 @@ mod tests {
             let e = tx
                 .set("hello".to_string(), "planet".to_string(), None)
                 .unwrap_err();
-            assert_eq!(e, DbError::TxClosed);
+            assert!(matches!(e, DbError::TxClosed));
             let e = tx.delete("hello".to_string()).unwrap_err();
-            assert_eq!(e, DbError::TxClosed);
+            assert!(matches!(e, DbError::TxClosed));
             let e = tx.get("hello".to_string(), true).unwrap_err();
-            assert_eq!(e, DbError::TxClosed);
+            assert!(matches!(e, DbError::TxClosed));
 
             tx.db_lock = Some(saved_db);
             tx.writable = false;
             let e = tx
                 .set("hello".to_string(), "planet".to_string(), None)
                 .unwrap_err();
-            assert_eq!(e, DbError::TxNotWritable);
+            assert!(matches!(e, DbError::TxNotWritable));
             let e = tx.delete("hello".to_string()).unwrap_err();
-            assert_eq!(e, DbError::TxNotWritable);
+            assert!(matches!(e, DbError::TxNotWritable));
             tx.writable = true;
 
             let e = tx.get("something".to_string(), true).unwrap_err();
-            assert_eq!(e, DbError::NotFound);
+            assert!(matches!(e, DbError::NotFound));
             let e = tx.delete("something".to_string()).unwrap_err();
-            assert_eq!(e, DbError::NotFound);
+            assert!(matches!(e, DbError::NotFound));
 
             tx.set(
                 "var".to_string(),
@@ -1459,9 +1564,9 @@ mod tests {
             )
             .unwrap();
             let e = tx.get("something".to_string(), true).unwrap_err();
-            assert_eq!(e, DbError::NotFound);
+            assert!(matches!(e, DbError::NotFound));
             let e = tx.delete("something".to_string()).unwrap_err();
-            assert_eq!(e, DbError::NotFound);
+            assert!(matches!(e, DbError::NotFound));
 
             Ok(())
         })
@@ -1494,7 +1599,7 @@ mod tests {
                 Ok(())
             })
             .unwrap_err();
-        assert_eq!(err, DbError::TxClosed);
+        assert!(matches!(err, DbError::TxClosed));
 
         // test for invalid writes
 
@@ -1734,12 +1839,12 @@ mod tests {
         let mut db = Db::open("data.db").unwrap();
         db.close().unwrap();
         let err = db.close().unwrap_err();
-        assert_eq!(err, DbError::DatabaseClosed);
+        assert!(matches!(err, DbError::DatabaseClosed));
 
         let mut db = Db::open(":memory:").unwrap();
         db.close().unwrap();
         let err = db.close().unwrap_err();
-        assert_eq!(err, DbError::DatabaseClosed);
+        assert!(matches!(err, DbError::DatabaseClosed));
 
         let _ = std::fs::remove_file("data.db");
     }
