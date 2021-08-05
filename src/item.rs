@@ -60,7 +60,7 @@ impl DbItem {
         if let Some(opts) = &self.opts {
             if opts.ex {
                 let now = time::SystemTime::now();
-                let ex = opts.exat.duration_since(now).unwrap().as_secs();
+                let ex = opts.exat.duration_since(now).unwrap_or_default().as_secs();
                 append_array(buf, 5);
                 append_bulk_string(buf, "set");
                 append_bulk_string(buf, &self.key);
