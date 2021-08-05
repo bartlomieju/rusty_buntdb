@@ -481,12 +481,11 @@ impl Db {
     ) -> (usize, Option<DbError>) {
         let mut total_size: usize = 0;
         let mut data = Vec::with_capacity(4096);
-        let mut parts = vec![];
 
         use io::BufRead;
         use io::Read;
 
-        let buf_reader = io::BufReader::new(reader);
+        let mut buf_reader = io::BufReader::new(reader);
         loop {
             // TODO: discrepancy with Go version, not checking
             // for nul byte first
@@ -496,7 +495,7 @@ impl Db {
             // first we should read the number of parts that command has
             let mut cmd_byte_size = 0;
             let mut line = String::new();
-            let r = buf_reader.read_line(&mut line);
+            let r =  buf_reader.read_line(&mut line);
             if let Err(err) = r {
                 return (total_size, Some(DbError::from(err)));
             }
@@ -509,8 +508,8 @@ impl Db {
             // convert the string number to an int
             let n = line.parse::<usize>().unwrap();
             // read each part of the command
-            parts = vec![];
-            for i in 0..n {
+            let mut parts = vec![];
+            for _ in 0..n {
                 // read the number of bytes of the part.
                 let mut line = String::new();
                 let r = buf_reader.read_line(&mut line);
@@ -581,9 +580,6 @@ impl Db {
             }
             total_size += cmd_byte_size;
         }
-
-        // (0, None)
-        todo!()
     }
 
     /// `load_from_disk` reads entries from the append only database file and fills the database.
@@ -593,12 +589,16 @@ impl Db {
     /// SET.
     #[allow(unused)]
     fn load_from_disk(&mut self) -> Result<(), DbError> {
-        let mut db = self.0.write();
-        let mut file = &(*db.file.as_ref().unwrap());
-        let metadata = file.metadata()?;
+        let boxed_file = {
+            let mut db = self.0.write();
+            let f = db.file.as_ref().unwrap().try_clone().unwrap();
+            Box::new(f)
+        };
+        
+        let metadata = boxed_file.metadata()?;
         let mod_time = metadata.modified()?;
 
-        let (n, maybe_err) = self.read_load(Box::new(file), mod_time);
+        let (n, maybe_err) = self.read_load(boxed_file, mod_time);
         let n = n as u64;
 
         if let Some(err) = maybe_err {
@@ -607,6 +607,8 @@ impl Db {
                     // The db file has ended mid-command, which is allowed but the
                     // data file should be truncated to the end of the last valid
                     // command
+                    let mut db = self.0.write();
+                    let mut file = db.file.as_mut().unwrap();
                     file.set_len(n)?;
                 }
             } else {
@@ -615,6 +617,8 @@ impl Db {
         }
 
         use std::io::Seek;
+        let mut db = self.0.write();
+        let mut file = db.file.as_mut().unwrap();
         let pos = file.seek(io::SeekFrom::Start(n))?;
         db.lastaofsz = pos;
         Ok(())
