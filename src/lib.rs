@@ -185,7 +185,12 @@ impl DbInner {
         // Generate a list of indexes that this item will be inserted into
         let mut ins_idxs = vec![];
         for (_, idx) in self.idxs.iter_mut() {
-            eprintln!("insert into, idx: {}, key: {}, matches: {}", idx.name, item.key, idx.matches(&item.key));
+            eprintln!(
+                "insert into, idx: {}, key: {}, matches: {}",
+                idx.name,
+                item.key,
+                idx.matches(&item.key)
+            );
             if idx.matches(&item.key) {
                 ins_idxs.push(idx);
             }
@@ -1263,7 +1268,7 @@ mod tests {
         let n = db.view(|tx| tx.len()).unwrap();
         assert_eq!(n, 200);
 
-        db.close().unwrap();
+        test_close(db);
     }
 
     #[test]
@@ -1299,7 +1304,7 @@ mod tests {
         .unwrap();
 
         std::fs::remove_file("temp.db").unwrap();
-        db.close().unwrap();
+        test_close(db);
     }
 
     // #[test]
@@ -1383,7 +1388,7 @@ mod tests {
         })
         .unwrap();
 
-        db.close().unwrap();
+        test_close(db);
     }
 
     #[test]
@@ -2088,6 +2093,47 @@ mod tests {
         assert_eq!(config.auto_shrink_min_size, 100);
         assert_eq!(config.auto_shrink_percentage, 200);
         assert_eq!(config.sync_policy, SyncPolicy::Always);
+
+        test_close(db);
+    }
+
+    #[test]
+    fn test_auto_shrink() {
+        let mut db = test_open();
+
+        for _ in 0..1000 {
+            db.update(|tx| {
+                for i in 0..20 {
+                    tx.set(format!("HELLO:{}", i), "WORLD".to_string(), None)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        db = test_reopen(Some(db));
+
+        {
+            let mut inner = db.0.write();
+            inner.config.auto_shrink_min_size = 64 * 1024; // 64K
+        }
+
+        for _ in 0..2000 {
+            db.update(|tx| {
+                for i in 0..20 {
+                    tx.set(format!("HELLO:{}", i), "WORLD".to_string(), None)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        std::thread::sleep(time::Duration::from_secs(3));
+        db = test_reopen(Some(db));
+        db.view(|tx| {
+            let n = tx.len()?;
+            assert_eq!(n, 20);
+            Ok(())
+        })
+        .unwrap();
 
         test_close(db);
     }

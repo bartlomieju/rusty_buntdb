@@ -149,7 +149,6 @@ impl Index {
         // iterate through all keys and fill the index
         keys.ascend(None, |item| {
             if !self.matches(&item.key) {
-
                 // does not match the pattern continue
                 return true;
             }
