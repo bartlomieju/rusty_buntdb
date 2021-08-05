@@ -459,6 +459,7 @@ impl Db {
         });
 
         if let Some(e) = err {
+            writer.flush()?;
             return Err(e);
         }
 
@@ -466,6 +467,7 @@ impl Db {
         if !buf.is_empty() {
             writer.write_all(&buf)?;
         }
+        writer.flush()?;
 
         Ok(())
     }
@@ -480,7 +482,6 @@ impl Db {
         mod_time: time::SystemTime,
     ) -> (usize, Option<DbError>) {
         let mut total_size: usize = 0;
-        let mut data = Vec::with_capacity(4096);
 
         use io::BufRead;
         use io::Read;
@@ -512,9 +513,13 @@ impl Db {
             }
             cmd_byte_size += line.len();
 
-            // TODO: need to strip leading '*'
             // convert the string number to an int
-            let n = line.parse::<usize>().unwrap();
+            let n = line
+                .strip_prefix("*")
+                .unwrap()
+                .trim()
+                .parse::<usize>()
+                .unwrap();
             // read each part of the command
             let mut parts = vec![];
             for _ in 0..n {
@@ -539,22 +544,26 @@ impl Db {
                     return (total_size, Some(DbError::Invalid));
                 }
                 cmd_byte_size += line.len();
-                // TODO: need to strip leading '$'
                 // convert the string number to an int
-                let n = line.parse::<usize>().unwrap();
+                let n = line
+                    .strip_prefix("$")
+                    .unwrap()
+                    .trim()
+                    .parse::<usize>()
+                    .unwrap();
 
-                // resize the read buffer
-                if data.capacity() < n + 2 {
-                    let mut dataln = data.capacity();
-                    while dataln < n + 2 {
-                        dataln *= 2;
-                    }
-                    data.reserve(dataln - data.capacity());
-                }
-                let r = buf_reader.read_exact(&mut data[0..n + 2]);
-                if let Err(err) = r {
-                    return (total_size, Some(DbError::from(err)));
-                }
+                // FIXME: bring back shared buffer
+                let mut data = Vec::with_capacity(n + 2);
+                data.resize(n + 2, 0);
+                // // resize the read buffer
+                // if data.capacity() < n + 2 {
+                //     let mut dataln = data.capacity();
+                //     while dataln < n + 2 {
+                //         dataln *= 2;
+                //     }
+                //     data.reserve(dataln - data.capacity());
+                // }
+                let r = buf_reader.read_exact(&mut data);
                 if let Err(err) = r {
                     return (total_size, Some(DbError::from(err)));
                 }
@@ -670,10 +679,11 @@ impl Db {
     /// Note that this can only work for fully in-memory databases opened with
     /// Open(":memory:").
     pub fn load(&mut self, reader: Box<dyn io::Read>) -> Result<(), DbError> {
-        let db = self.0.write();
-
-        if db.persist {
-            return Err(DbError::PersistenceActive);
+        {
+            let db = self.0.write();
+            if db.persist {
+                return Err(DbError::PersistenceActive);
+            }
         }
 
         let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
@@ -1187,6 +1197,8 @@ pub fn index_string_case_sensitive(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
 
     macro_rules! svec {
@@ -1212,12 +1224,43 @@ mod tests {
 
     fn test_close(mut db: Db) {
         let _ = db.close();
-        // let _ = std::fs::remove_file("data.db");
+        let _ = std::fs::remove_file("data.db");
     }
 
     #[test]
     fn save_load() {
-        let _db = Db::open(":memory:").unwrap();
+        let mut db = Db::open(":memory:").unwrap();
+
+        db.update(|tx| {
+            for i in 0..20 {
+                tx.set(format!("key:{}", i), format!("planet:{}", i), None)
+                    .unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let mut f = std::fs::File::create("temp.db").unwrap();
+        db.save(&mut f).unwrap();
+        drop(f);
+        db.close().unwrap();
+
+        let mut db = Db::open(":memory:").unwrap();
+        let f = std::fs::File::open("temp.db").unwrap();
+        db.load(Box::new(f)).unwrap();
+
+        db.view(|tx| {
+            for i in 0..20 {
+                let ex = format!("planet:{}", i);
+                let val = tx.get(format!("key:{}", i), false).unwrap();
+                assert_eq!(val, ex);
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        std::fs::remove_file("temp.db").unwrap();
+        db.close().unwrap();
     }
 
     #[test]
