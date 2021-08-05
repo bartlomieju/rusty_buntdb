@@ -21,6 +21,7 @@ use std::time;
 mod btree_helpers;
 mod index;
 mod item;
+mod matcher;
 mod tx;
 
 use crate::btree_helpers::btree_ascend_greater_or_equal;
@@ -184,6 +185,7 @@ impl DbInner {
         // Generate a list of indexes that this item will be inserted into
         let mut ins_idxs = vec![];
         for (_, idx) in self.idxs.iter_mut() {
+            eprintln!("insert into, idx: {}, key: {}, matches: {}", idx.name, item.key, idx.matches(&item.key));
             if idx.matches(&item.key) {
                 ins_idxs.push(idx);
             }
@@ -364,7 +366,7 @@ fn exps_compare_fn(a: &DbItem, b: &DbItem) -> Ordering {
 }
 
 impl Db {
-    pub fn open(path: &str) -> Result<Db, io::Error> {
+    pub fn open(path: &str) -> Result<Db, DbError> {
         // initialize default configuration
         let config = Config {
             auto_shrink_percentage: 100,
@@ -387,7 +389,9 @@ impl Db {
             lastaofsz: 0,
         };
 
-        if inner.persist {
+        let persist = inner.persist;
+
+        if persist {
             // hardcoding 0666 as the default mode.
             let file = OpenOptions::new()
                 .create(true)
@@ -395,18 +399,20 @@ impl Db {
                 .write(true)
                 .open(path)?;
             inner.file = Some(file);
-
-            // load the database from disk
-            // TODO:
-            // if let Err(err) = db.load_from_disk() {
-            //     // close on error, ignore close error
-            //     db.file.take();
-            //     return Err(err);
-            // }
         }
 
-        let db = Db(Arc::new(RwLock::new(inner)));
-        // TODO:
+        let mut db = Db(Arc::new(RwLock::new(inner)));
+
+        if persist {
+            // load the database from disk
+            if let Err(err) = db.load_from_disk() {
+                // close on error, ignore close error
+                let mut inner = db.0.write();
+                inner.file.take();
+                return Err(err);
+            }
+        }
+
         // start the background manager
         db.background_manager();
 
@@ -590,7 +596,8 @@ impl Db {
                     }
                     let ex = parts[4].parse::<u64>().unwrap();
                     let now = time::SystemTime::now();
-                    let dur = time::Duration::from_secs(ex) - now.duration_since(mod_time).unwrap();
+                    let dur = time::Duration::from_secs(ex)
+                        .saturating_sub(now.duration_since(mod_time).unwrap());
                     if dur.as_secs() > 0 {
                         let exat = time::SystemTime::now() + dur;
                         let mut db = self.0.write();
@@ -636,10 +643,9 @@ impl Db {
     /// of RESP commands. For more information on RESP please read
     /// http://redis.io/topics/protocol. The only supported RESP commands are DEL and
     /// SET.
-    #[allow(unused)]
     fn load_from_disk(&mut self) -> Result<(), DbError> {
         let boxed_file = {
-            let mut db = self.0.write();
+            let db = self.0.write();
             let f = db.file.as_ref().unwrap().try_clone().unwrap();
             Box::new(f)
         };
@@ -647,7 +653,6 @@ impl Db {
         let metadata = boxed_file.metadata()?;
         let mod_time = metadata.modified()?;
 
-        use std::convert::TryInto;
         let (n, maybe_err) = self.read_load(boxed_file, mod_time);
         let n = n as u64;
 
@@ -658,7 +663,7 @@ impl Db {
                     // data file should be truncated to the end of the last valid
                     // command
                     let mut db = self.0.write();
-                    let mut file = db.file.as_mut().unwrap();
+                    let file = db.file.as_mut().unwrap();
                     file.set_len(n)?;
                 }
             } else {
@@ -668,7 +673,7 @@ impl Db {
 
         use std::io::Seek;
         let mut db = self.0.write();
-        let mut file = db.file.as_mut().unwrap();
+        let file = db.file.as_mut().unwrap();
         let pos = file.seek(io::SeekFrom::Start(n))?;
         db.lastaofsz = pos;
         Ok(())
@@ -1196,6 +1201,8 @@ pub fn index_string_case_sensitive(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     macro_rules! svec {
@@ -1222,6 +1229,41 @@ mod tests {
     fn test_close(mut db: Db) {
         let _ = db.close();
         let _ = std::fs::remove_file("data.db");
+    }
+
+    #[test]
+    fn background_operations() {
+        let mut db = test_open();
+
+        for _ in 0..1000 {
+            db.update(|tx| {
+                for j in 0..200 {
+                    tx.set(format!("hello{}", j), "planet".to_string(), None)?;
+                }
+                tx.set(
+                    "hi".to_string(),
+                    "world".to_string(),
+                    Some(SetOptions {
+                        expires: true,
+                        ttl: Duration::from_millis(500),
+                    }),
+                )?;
+                Ok(())
+            })
+            .unwrap()
+        }
+
+        let n = db.view(|tx| tx.len()).unwrap();
+        assert_eq!(n, 201);
+
+        // sleep to let one item expire
+        std::thread::sleep(Duration::from_millis(1500));
+
+        db = test_reopen(Some(db));
+        let n = db.view(|tx| tx.len()).unwrap();
+        assert_eq!(n, 200);
+
+        test_close(db);
     }
 
     #[test]
@@ -1257,7 +1299,91 @@ mod tests {
         .unwrap();
 
         std::fs::remove_file("temp.db").unwrap();
-        db.close().unwrap();
+        test_close(db);
+    }
+
+    // #[test]
+    // fn mutating_iterator() {
+    //     let mut db = test_open();
+
+    //     let count = 1000;
+
+    //     db.create_index(
+    //         "ages".to_string(),
+    //         "user:*:age".to_string(),
+    //         vec![Arc::new(index_int)],
+    //     )
+    //     .unwrap();
+
+    //     for _i in 0..10 {
+    //         db.update(|tx| {
+    //             for j in 0..count {
+    //                 let key = format!("user:{}:age", j);
+    //                 let val = format!("{}", j);
+    //                 tx.set(key, val, None)?;
+    //             }
+    //             Ok(())
+    //         })
+    //         .unwrap();
+
+    //         db.update(|tx| {
+    //             // TODO: this doesn't compile
+    //             tx.ascend("ages".to_string(), |k, _v| {
+    //                 let err = tx.delete(k.to_string()).unwrap_err();
+    //                 assert!(matches!(err, DbError::TxIterating));
+    //                 let err = tx.set(k.to_string(), "".to_string(), None).unwrap_err();
+    //                 assert!(matches!(err, DbError::TxIterating));
+    //                 true
+    //             })
+    //         })
+    //         .unwrap()
+    //     }
+
+    //     db.close().unwrap();
+    // }
+
+    #[test]
+    fn case_insensitive_index() {
+        let mut db = test_open();
+
+        let count = 1000;
+
+        db.update(|tx| {
+            let opts = IndexOptions {
+                case_insensitive_key_matching: true,
+            };
+            tx.create_index_options(
+                "ages".to_string(),
+                "User:*:age".to_string(),
+                opts,
+                vec![Arc::new(index_int)],
+            )
+        })
+        .unwrap();
+
+        db.update(|tx| {
+            for j in 0..count {
+                let key = format!("user:{}:age", j);
+                let val = format!("{}", j);
+                tx.set(key, val, None)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        db.view(|tx| {
+            let mut vals = vec![];
+            tx.ascend("ages".to_string(), |_key, val| {
+                vals.push(val.to_string());
+                true
+            })
+            .unwrap();
+            assert_eq!(vals.len(), count);
+            Ok(())
+        })
+        .unwrap();
+
+        test_close(db);
     }
 
     #[test]
@@ -1918,6 +2044,17 @@ mod tests {
     }
 
     #[test]
+    fn opening_invalid_database_file() {
+        let _ = std::fs::remove_file("data.db");
+        std::fs::write("data.db", "invalid\r\nfile").unwrap();
+
+        let db_result = Db::open("data.db");
+        
+        assert!(db_result.is_err());
+        let _ = std::fs::remove_file("data.db");
+    }
+
+    #[test]
     fn test_opening_a_closed_database() {
         let _ = std::fs::remove_file("data.db");
 
@@ -1965,4 +2102,79 @@ mod tests {
 
         test_close(db);
     }
+
+    #[test]
+    fn test_auto_shrink() {
+        let mut db = test_open();
+
+        for _ in 0..1000 {
+            db.update(|tx| {
+                for i in 0..20 {
+                    tx.set(
+                        format!("HELLO:{}", i),
+                        "WORLD".to_string(),
+                        None
+                    )?;
+                }
+                Ok(())
+            }).unwrap();
+        }
+        db = test_reopen(Some(db));
+
+        {
+            let mut inner = db.0.write();
+            inner.config.auto_shrink_min_size = 64 * 1024; // 64K
+        }
+        
+        for _ in 0..2000 {
+            db.update(|tx| {
+                for i in 0..20 {
+                    tx.set(
+                        format!("HELLO:{}", i),
+                        "WORLD".to_string(),
+                        None
+                    )?;
+                }
+                Ok(())
+            }).unwrap();
+        }
+        std::thread::sleep(time::Duration::from_secs(3));
+        db = test_reopen(Some(db));
+        db.view(|tx| {
+            let n = tx.len()?;
+            assert_eq!(n, 20);
+            Ok(())
+        }).unwrap();
+
+        test_close(db);
+    }
+
+    // #[test]
+    // fn database_format() {
+    //     {
+    //         let resp = vec![
+    //             "*3\r\n$3\r\nset\r\n$4\r\nvar1\r\n$4\r\n1234\r\n",
+    //             "*3\r\n$3\r\nset\r\n$4\r\nvar2\r\n$4\r\n1234\r\n",
+    //             "*2\r\n$3\r\ndel\r\n$4\r\nvar1\r\n",
+    //             "*5\r\n$3\r\nset\r\n$3\r\nvar\r\n$3\r\nval\r\n$2\r\nex\r\n$2\r\n10\r\n",
+    //         ].join("");
+    //         let _ = std::fs::remove_file("data.db");
+    //         let mut f = std::fs::File::create("data.db").unwrap();
+    //         f.write_all(resp.as_bytes());
+    //         f.flush();
+    //         let db = test_open();
+    //         test_close(db);
+    //     }
+
+    //     fn test_format(expect_valid: bool, resp: String, cb: dyn Fn(&mut Db)) {
+    //         let _ = std::fs::remove_file("data.db");
+    //         let mut f = std::fs::File::create("data.db").unwrap();
+    //         f.write_all(resp.as_bytes());
+    //         f.flush();
+
+    //         let db = 
+
+    //         let _ = std::fs::remove_file("data.db");
+    //     }
+    // }
 }
