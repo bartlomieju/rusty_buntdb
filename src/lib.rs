@@ -185,12 +185,7 @@ impl DbInner {
         // Generate a list of indexes that this item will be inserted into
         let mut ins_idxs = vec![];
         for (_, idx) in self.idxs.iter_mut() {
-            eprintln!(
-                "insert into, idx: {}, key: {}, matches: {}",
-                idx.name,
-                item.key,
-                idx.matches(&item.key)
-            );
+            eprintln!("insert into, idx: {}, key: {}, matches: {}", idx.name, item.key, idx.matches(&item.key));
             if idx.matches(&item.key) {
                 ins_idxs.push(idx);
             }
@@ -2049,6 +2044,17 @@ mod tests {
     }
 
     #[test]
+    fn opening_invalid_database_file() {
+        let _ = std::fs::remove_file("data.db");
+        std::fs::write("data.db", "invalid\r\nfile").unwrap();
+
+        let db_result = Db::open("data.db");
+        
+        assert!(db_result.is_err());
+        let _ = std::fs::remove_file("data.db");
+    }
+
+    #[test]
     fn test_opening_a_closed_database() {
         let _ = std::fs::remove_file("data.db");
 
@@ -2104,11 +2110,14 @@ mod tests {
         for _ in 0..1000 {
             db.update(|tx| {
                 for i in 0..20 {
-                    tx.set(format!("HELLO:{}", i), "WORLD".to_string(), None)?;
+                    tx.set(
+                        format!("HELLO:{}", i),
+                        "WORLD".to_string(),
+                        None
+                    )?;
                 }
                 Ok(())
-            })
-            .unwrap();
+            }).unwrap();
         }
         db = test_reopen(Some(db));
 
@@ -2116,15 +2125,18 @@ mod tests {
             let mut inner = db.0.write();
             inner.config.auto_shrink_min_size = 64 * 1024; // 64K
         }
-
+        
         for _ in 0..2000 {
             db.update(|tx| {
                 for i in 0..20 {
-                    tx.set(format!("HELLO:{}", i), "WORLD".to_string(), None)?;
+                    tx.set(
+                        format!("HELLO:{}", i),
+                        "WORLD".to_string(),
+                        None
+                    )?;
                 }
                 Ok(())
-            })
-            .unwrap();
+            }).unwrap();
         }
         std::thread::sleep(time::Duration::from_secs(3));
         db = test_reopen(Some(db));
@@ -2132,9 +2144,37 @@ mod tests {
             let n = tx.len()?;
             assert_eq!(n, 20);
             Ok(())
-        })
-        .unwrap();
+        }).unwrap();
 
         test_close(db);
     }
+
+    // #[test]
+    // fn database_format() {
+    //     {
+    //         let resp = vec![
+    //             "*3\r\n$3\r\nset\r\n$4\r\nvar1\r\n$4\r\n1234\r\n",
+    //             "*3\r\n$3\r\nset\r\n$4\r\nvar2\r\n$4\r\n1234\r\n",
+    //             "*2\r\n$3\r\ndel\r\n$4\r\nvar1\r\n",
+    //             "*5\r\n$3\r\nset\r\n$3\r\nvar\r\n$3\r\nval\r\n$2\r\nex\r\n$2\r\n10\r\n",
+    //         ].join("");
+    //         let _ = std::fs::remove_file("data.db");
+    //         let mut f = std::fs::File::create("data.db").unwrap();
+    //         f.write_all(resp.as_bytes());
+    //         f.flush();
+    //         let db = test_open();
+    //         test_close(db);
+    //     }
+
+    //     fn test_format(expect_valid: bool, resp: String, cb: dyn Fn(&mut Db)) {
+    //         let _ = std::fs::remove_file("data.db");
+    //         let mut f = std::fs::File::create("data.db").unwrap();
+    //         f.write_all(resp.as_bytes());
+    //         f.flush();
+
+    //         let db = 
+
+    //         let _ = std::fs::remove_file("data.db");
+    //     }
+    // }
 }
