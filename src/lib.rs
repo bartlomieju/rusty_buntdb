@@ -553,8 +553,7 @@ impl Db {
                     .unwrap();
 
                 // FIXME: bring back shared buffer
-                let mut data = Vec::with_capacity(n + 2);
-                data.resize(n + 2, 0);
+                let mut data = vec![0; n + 2];
                 // // resize the read buffer
                 // if data.capacity() < n + 2 {
                 //     let mut dataln = data.capacity();
@@ -1197,8 +1196,6 @@ pub fn index_string_case_sensitive(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
-
     use super::*;
 
     macro_rules! svec {
