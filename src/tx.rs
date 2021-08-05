@@ -549,7 +549,7 @@ impl<'db> Tx<'db> {
                 // TTL to an absolute time and bind it to the item.
                 item.opts = Some(DbItemOpts {
                     ex: true,
-                    exat: time::Instant::now() + opts.ttl,
+                    exat: time::SystemTime::now() + opts.ttl,
                 });
             }
         }
@@ -674,11 +674,11 @@ impl<'db> Tx<'db> {
             Some(item) => {
                 if let Some(opts) = &item.opts {
                     if opts.ex {
-                        let dur = opts.exat.saturating_duration_since(time::Instant::now());
-                        if dur == time::Duration::from_secs(0) {
+                        let dur = opts.exat.duration_since(time::SystemTime::now());
+                        if dur.is_err() {
                             return Err(DbError::NotFound);
                         }
-                        return Ok(Some(dur));
+                        return Ok(Some(dur.unwrap()));
                     }
                 }
 

@@ -7,7 +7,7 @@ pub struct DbItemOpts {
     /// does this item expire?
     pub ex: bool,
     /// when does this item expire?
-    pub exat: time::Instant,
+    pub exat: time::SystemTime,
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
@@ -24,10 +24,10 @@ pub struct DbItem {
 
 // This is a long time in the future. It's an imaginary number that is
 // used for b-tree ordering.
-static MAX_TIME: OnceCell<time::Instant> = OnceCell::new();
+static MAX_TIME: OnceCell<time::SystemTime> = OnceCell::new();
 
-fn get_max_time() -> time::Instant {
-    *MAX_TIME.get_or_init(|| time::Instant::now() + time::Duration::MAX)
+fn get_max_time() -> time::SystemTime {
+    *MAX_TIME.get_or_init(|| time::SystemTime::now() + time::Duration::MAX)
 }
 
 impl DbItem {
@@ -35,7 +35,7 @@ impl DbItem {
     // the item does not have `opts.ex` set to true.
     pub fn expired(&self) -> bool {
         if let Some(opts) = &self.opts {
-            return opts.ex && opts.exat < time::Instant::now();
+            return opts.ex && opts.exat < time::SystemTime::now();
         }
 
         false
@@ -43,7 +43,7 @@ impl DbItem {
 
     // expiresAt will return the time when the item will expire. When an item does
     // not expire `maxTime` is used.
-    pub fn expires_at(&self) -> time::Instant {
+    pub fn expires_at(&self) -> time::SystemTime {
         if let Some(opts) = &self.opts {
             if !opts.ex {
                 return get_max_time();
@@ -59,8 +59,8 @@ impl DbItem {
     pub fn write_set_to(&self, buf: &mut Vec<u8>) {
         if let Some(opts) = &self.opts {
             if opts.ex {
-                let now = time::Instant::now();
-                let ex = opts.exat.saturating_duration_since(now).as_secs();
+                let now = time::SystemTime::now();
+                let ex = opts.exat.duration_since(now).unwrap_or_default().as_secs();
                 append_array(buf, 5);
                 append_bulk_string(buf, "set");
                 append_bulk_string(buf, &self.key);
