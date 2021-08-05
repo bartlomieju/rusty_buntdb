@@ -477,7 +477,7 @@ impl Db {
     pub fn read_load(
         &self,
         reader: Box<dyn io::Read>,
-        mod_time: time::Instant,
+        mod_time: time::SystemTime,
     ) -> (usize, Option<DbError>) {
         let mut total_size: usize = 0;
         let mut data = Vec::with_capacity(4096);
@@ -581,10 +581,10 @@ impl Db {
                         return (total_size, Some(DbError::Invalid));
                     }
                     let ex = parts[4].parse::<u64>().unwrap();
-                    let now = time::Instant::now();
-                    let dur = time::Duration::from_secs(ex) - (time::Instant::now() - mod_time);
+                    let now = time::SystemTime::now();
+                    let dur = time::Duration::from_secs(ex) - now.duration_since(mod_time).unwrap();
                     if dur.as_secs() > 0 {
-                        let exat = time::Instant::now() + dur;
+                        let exat = time::SystemTime::now() + dur;
                         let mut db = self.0.write();
                         db.insert_into_database(DbItem {
                             key: parts[1].to_string(),
@@ -640,7 +640,7 @@ impl Db {
         let mod_time = metadata.modified()?;
 
         use std::convert::TryInto;
-        let (n, maybe_err) = self.read_load(boxed_file, mod_time.try_into().unwrap());
+        let (n, maybe_err) = self.read_load(boxed_file, mod_time);
         let n = n as u64;
 
         if let Some(err) = maybe_err {
@@ -676,7 +676,7 @@ impl Db {
             return Err(DbError::PersistenceActive);
         }
 
-        let (_, maybe_err) = self.read_load(reader, time::Instant::now());
+        let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
 
         if let Some(err) = maybe_err {
             return Err(err);
@@ -848,7 +848,7 @@ impl Db {
             let key_item = DbItem {
                 opts: Some(DbItemOpts {
                     ex: true,
-                    exat: time::Instant::now(),
+                    exat: time::SystemTime::now(),
                 }),
                 ..Default::default()
             };
@@ -1568,8 +1568,7 @@ mod tests {
                 Err(err_broken)
             })
             .unwrap_err();
-        let err = DbError::Custom("broken".to_string());
-        assert!(matches!(e, err));
+        assert!(matches!(e, DbError::Custom(_)));
 
         let val = db.view(|tx| tx.get("hello".to_string(), true)).unwrap();
         assert_eq!(val, "planet");
