@@ -477,7 +477,7 @@ impl Db {
     pub fn read_load(
         &self,
         reader: Box<dyn io::Read>,
-        mod_time: time::SystemTime,
+        mod_time: time::Instant,
     ) -> (usize, Option<DbError>) {
         let mut total_size: usize = 0;
         let mut data = Vec::with_capacity(4096);
@@ -495,9 +495,17 @@ impl Db {
             // first we should read the number of parts that command has
             let mut cmd_byte_size = 0;
             let mut line = String::new();
-            let r =  buf_reader.read_line(&mut line);
-            if let Err(err) = r {
-                return (total_size, Some(DbError::from(err)));
+            let r = buf_reader.read_line(&mut line);
+            match r {
+                Ok(n) => {
+                    // we've reached EOF
+                    if n == 0 {
+                        return (total_size, None);
+                    }
+                }
+                Err(err) => {
+                    return (total_size, Some(DbError::from(err)));
+                }
             }
             if !line.starts_with('*') {
                 return (total_size, Some(DbError::Invalid));
@@ -513,6 +521,17 @@ impl Db {
                 // read the number of bytes of the part.
                 let mut line = String::new();
                 let r = buf_reader.read_line(&mut line);
+                match r {
+                    Ok(n) => {
+                        if n == 0 {
+                            let e = io::Error::new(io::ErrorKind::UnexpectedEof, "");
+                            return (total_size, Some(DbError::from(e)));
+                        }
+                    }
+                    Err(err) => {
+                        return (total_size, Some(DbError::from(err)));
+                    }
+                }
                 if let Err(err) = r {
                     return (total_size, Some(DbError::from(err)));
                 }
@@ -533,6 +552,9 @@ impl Db {
                     data.reserve(dataln - data.capacity());
                 }
                 let r = buf_reader.read_exact(&mut data[0..n + 2]);
+                if let Err(err) = r {
+                    return (total_size, Some(DbError::from(err)));
+                }
                 if let Err(err) = r {
                     return (total_size, Some(DbError::from(err)));
                 }
@@ -558,7 +580,26 @@ impl Db {
                     if parts[3].to_lowercase() != "ex" {
                         return (total_size, Some(DbError::Invalid));
                     }
-                    // TODO:
+                    let ex = parts[4].parse::<u64>().unwrap();
+                    let now = time::Instant::now();
+                    let dur = time::Duration::from_secs(ex) - (time::Instant::now() - mod_time);
+                    if dur.as_secs() > 0 {
+                        let exat = time::Instant::now() + dur;
+                        let mut db = self.0.write();
+                        db.insert_into_database(DbItem {
+                            key: parts[1].to_string(),
+                            val: parts[2].to_string(),
+                            opts: Some(DbItemOpts { ex: true, exat }),
+                            keyless: false,
+                        });
+                    }
+                } else {
+                    let mut db = self.0.write();
+                    db.insert_into_database(DbItem {
+                        key: parts[1].to_string(),
+                        val: parts[2].to_string(),
+                        ..Default::default()
+                    });
                 }
             } else if parts[0].to_lowercase() == "del" {
                 // DEL
@@ -594,11 +635,12 @@ impl Db {
             let f = db.file.as_ref().unwrap().try_clone().unwrap();
             Box::new(f)
         };
-        
+
         let metadata = boxed_file.metadata()?;
         let mod_time = metadata.modified()?;
 
-        let (n, maybe_err) = self.read_load(boxed_file, mod_time);
+        use std::convert::TryInto;
+        let (n, maybe_err) = self.read_load(boxed_file, mod_time.try_into().unwrap());
         let n = n as u64;
 
         if let Some(err) = maybe_err {
@@ -634,7 +676,7 @@ impl Db {
             return Err(DbError::PersistenceActive);
         }
 
-        let (_, maybe_err) = self.read_load(reader, time::SystemTime::now());
+        let (_, maybe_err) = self.read_load(reader, time::Instant::now());
 
         if let Some(err) = maybe_err {
             return Err(err);
