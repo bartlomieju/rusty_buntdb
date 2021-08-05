@@ -21,6 +21,7 @@ use std::time;
 mod btree_helpers;
 mod index;
 mod item;
+mod matcher;
 mod tx;
 
 use crate::btree_helpers::btree_ascend_greater_or_equal;
@@ -184,6 +185,7 @@ impl DbInner {
         // Generate a list of indexes that this item will be inserted into
         let mut ins_idxs = vec![];
         for (_, idx) in self.idxs.iter_mut() {
+            eprintln!("insert into, idx: {}, key: {}, matches: {}", idx.name, item.key, idx.matches(&item.key));
             if idx.matches(&item.key) {
                 ins_idxs.push(idx);
             }

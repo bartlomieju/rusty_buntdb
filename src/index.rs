@@ -68,15 +68,14 @@ impl Index {
             let chars_iter = key.chars();
             for char_ in chars_iter {
                 if ('A'..='Z').contains(&char_) {
+                    eprintln!("got lower case");
                     key = key.to_lowercase();
                     break;
                 }
             }
         }
 
-        // TODO: need to port https://github.com/tidwall/match package
-        let r = self.pattern.matches(&key).peekable().peek().is_some();
-        r
+        crate::matcher::matches(&self.pattern, &key)
     }
 
     // `clear_copy` creates a copy of the index, but with an empty dataset.
@@ -150,6 +149,7 @@ impl Index {
         // iterate through all keys and fill the index
         keys.ascend(None, |item| {
             if !self.matches(&item.key) {
+
                 // does not match the pattern continue
                 return true;
             }

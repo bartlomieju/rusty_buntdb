@@ -196,12 +196,12 @@ impl<'db> Tx<'db> {
             }
         };
 
-        eprintln!("creating index");
         let mut pattern = pattern;
         let options = opts.unwrap_or_default();
         if options.case_insensitive_key_matching {
             pattern = pattern.to_lowercase();
         }
+        eprintln!("creating index: {}", pattern);
 
         let mut idx = Index::new(name, pattern, less, rect, options);
         idx.rebuild(&db.keys);
